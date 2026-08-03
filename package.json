@@ -2,7 +2,7 @@
   "name": "xplore26-treasure-hunt",
   "version": "1.0.0",
   "private": true,
-  "description": "XPLORE'26 treasure hunt — four browser puzzles (cipher, colour grid, circuit, 3D mystery room).",
+  "description": "XPLORE'26 — the Mystery Room, a searchable 3D room puzzle (guide section 8).",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -11,15 +11,11 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "seed:coins": "tsx --env-file=.env.local scripts/seed-coins.ts",
-    "seed:hunt": "tsx --env-file=.env.local scripts/seed-hunt.ts",
-    "verify:hunt": "tsx --env-file=.env.local scripts/verify-hunt.ts",
     "shoot": "node scripts/shoot-room.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.0.6",
     "@react-three/fiber": "^9.1.0",
-    "mongodb": "^6.13.0",
     "next": "^16.0.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
@@ -35,7 +31,6 @@
     "eslint-config-next": "^16.0.0",
     "playwright": "^1.62.1",
     "tailwindcss": "^4.1.0",
-    "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }
