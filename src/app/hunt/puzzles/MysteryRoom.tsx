@@ -9,7 +9,7 @@ import Prop from "./MysteryRoomProp";
 import RoomScene from "./MysteryRoomScene";
 import Board from "./MysteryRoomBoard";
 import RoomBoundary from "./MysteryRoomBoundary";
-import { FilmPickup, HeldTorch, TorchPickup } from "./MysteryRoomTools";
+import { FilmPickup, HeldTorch, HiddenBook, TorchPickup, WallClock } from "./MysteryRoomTools";
 import type { PuzzleProps } from "../registry";
 
 /**
@@ -57,8 +57,14 @@ export default function MysteryRoom({ onSolve }: PuzzleProps) {
   const [found, setFound] = useState<string[]>([]);
 
   // Tools. Neither is a task — they are what makes the board task solvable.
+  // Each is inside a container that has to be opened first, so the two
+  // `*Open` flags gate whether the pickup exists in the scene at all rather
+  // than merely hiding it: a pickup that is only invisible is still there to
+  // be clicked through.
+  const [clockOpen, setClockOpen] = useState(false);
   const [torchTaken, setTorchTaken] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
+  const [bookOpen, setBookOpen] = useState(false);
   const [filmTaken, setFilmTaken] = useState(false);
   const [filmOn, setFilmOn] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -135,8 +141,16 @@ export default function MysteryRoom({ onSolve }: PuzzleProps) {
           <Player dragRef={dragRef} />
           <RoomScene />
 
-          {/* Tools */}
-          {!torchTaken && (
+          {/* Tools, each behind something that has to be opened first */}
+          <WallClock
+            open={clockOpen}
+            dragRef={dragRef}
+            onOpen={() => {
+              setClockOpen(true);
+              say("The clock swings aside. There is a recess cut into the wall behind it.");
+            }}
+          />
+          {clockOpen && !torchTaken && (
             <TorchPickup
               dragRef={dragRef}
               onPick={() => {
@@ -145,7 +159,16 @@ export default function MysteryRoom({ onSolve }: PuzzleProps) {
               }}
             />
           )}
-          {!filmTaken && (
+
+          <HiddenBook
+            open={bookOpen}
+            dragRef={dragRef}
+            onOpen={() => {
+              setBookOpen(true);
+              say("The book falls open. Its pages have been cut away around something.");
+            }}
+          />
+          {bookOpen && !filmTaken && (
             <FilmPickup
               dragRef={dragRef}
               onPick={() => {

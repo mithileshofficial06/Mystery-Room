@@ -1,7 +1,11 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import type { ReactNode } from "react";
+import { useFrame } from "@react-three/fiber";
+import { Color } from "three";
+import type { Group, Mesh, MeshBasicMaterial, PointLight } from "three";
+import { isOnAt, toSpans } from "@/lib/hunt/morse";
 
 /**
  * The room itself — everything that is NOT interactive.
@@ -53,6 +57,13 @@ export interface Footprint {
  * desk in front of a hall of people. Keep this list in step with the geometry
  * below; it lives in this file precisely so moving a shelf means editing one
  * place.
+ *
+ * ADDING ONE IS NOT FREE. Every footprint is inflated by the body radius, so
+ * two pieces of furniture 0.6m apart leave no gap at all, and a footprint laid
+ * across a corridor can seal off a whole corner of the room — including a
+ * corner something is hidden in. The left-hand corridor at z ~= 0.5, between
+ * the filing cabinets and the crates, is the only route to the window end;
+ * nothing may be placed in it.
  */
 export const OBSTACLES: Footprint[] = [
   { minX: -3.7, maxX: -0.7, minZ: -3.8, maxZ: -2.2 }, // desk
@@ -64,10 +75,24 @@ export const OBSTACLES: Footprint[] = [
   { minX: 1.1, maxX: 3.7, minZ: -3.4, maxZ: -2.4 }, // bookcase
   { minX: -4.1, maxX: -1.1, minZ: 1.1, maxZ: 2.7 }, // crates and barrel
   { minX: -1.3, maxX: 1.7, minZ: -5.0, maxZ: -3.6 }, // terminal table
-  { minX: -6.0, maxX: -4.2, minZ: -4.4, maxZ: -0.2 }, // filing cabinets
+  // Runs to -3.95 rather than the cabinet carcass at -4.2 so the player cannot
+  // walk through the one drawer that is pulled out.
+  { minX: -6.0, maxX: -3.95, minZ: -4.4, maxZ: -0.2 }, // filing cabinets
   { minX: 4.7, maxX: 6.0, minZ: 1.4, maxZ: 3.2 }, // radiator + plant
-  { minX: 3.4, maxX: 4.6, minZ: -5.2, maxZ: -4.2 }, // step ladder
+  // In the back-right corner, not out in the room. Parked where it used to be
+  // (z -5.2..-4.2) its inflated footprint came within 12cm of the bookcase's,
+  // and that 12cm was the whole width of the only lane from the front of the
+  // room to the back wall. Nothing was technically unreachable, which is
+  // exactly why it took walking it to notice.
+  { minX: 4.1, maxX: 5.3, minZ: -5.8, maxZ: -4.8 }, // step ladder
   { minX: -5.6, maxX: -4.6, minZ: 2.2, maxZ: 3.4 }, // coat stand
+  // Against the back wall rather than the right one. On the right wall it ate
+  // the 1.1m corridor between the bookcase and the wall, which is the artery
+  // the whole right-hand half of the room hangs off.
+  { minX: -2.8, maxX: -1.6, minZ: -5.9, maxZ: -4.9 }, // stove
+  // Stops short of x=3.94 so the front-right corner stays walkable past it.
+  { minX: 2.2, maxX: 3.6, minZ: 3.1, maxZ: 3.9 }, // steamer trunk
+  { minX: 0.7, maxX: 1.7, minZ: 3.5, maxZ: 4.2 }, // sack barrow
 ];
 
 /** One shared palette, so a new piece of furniture doesn't invent its own browns. */
@@ -91,6 +116,11 @@ const C = {
   green: "#3f6b4e",
   screen: "#2f8f7d",
   glass: "#93b8c9",
+  ink: "#20242a",
+  rust: "#7d4a33",
+  enamel: "#2f3a44",
+  cloth: "#4a3b4f",
+  jar: "#a8c4bd",
 };
 
 interface BoxProps {
@@ -112,7 +142,7 @@ function Box({ position, size, colour, rotation, roughness = 0.85, metalness = 0
   );
 }
 
-/** Floor, ceiling, four walls, skirting, dado rail. */
+/** Floor, ceiling, four walls, skirting, dado rail, picture rail. */
 function Structure() {
   const { halfWidth, height, backZ, frontZ } = ROOM;
   const depth = frontZ - backZ;
@@ -121,6 +151,15 @@ function Structure() {
   const boards = useMemo(
     () => Array.from({ length: 13 }, (_, i) => -halfWidth + 0.45 + i * 0.92),
     [halfWidth]
+  );
+  // Short cross-joints, so the planks read as boards laid end to end rather
+  // than thirteen strips running the whole length of the room.
+  const joints = useMemo(
+    () =>
+      boards.flatMap((x, i) =>
+        [-4.1, -0.6, 2.4].map((z) => ({ x, z: z + ((i * 31) % 7) * 0.28 }))
+      ),
+    [boards]
   );
 
   return (
@@ -136,8 +175,18 @@ function Structure() {
           <meshStandardMaterial color={C.floorBoard} roughness={1} />
         </mesh>
       ))}
+      {joints.map((j) => (
+        <mesh
+          key={`${j.x}:${j.z}`}
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[j.x + 0.46, 0.005, j.z]}
+        >
+          <planeGeometry args={[0.86, 0.05]} />
+          <meshStandardMaterial color={C.floorBoard} roughness={1} />
+        </mesh>
+      ))}
 
-      {/* Rug */}
+      {/* Rug, with a border and a worn centre */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.012, -0.4]} receiveShadow>
         <planeGeometry args={[6.4, 4.6]} />
         <meshStandardMaterial color={C.rug} roughness={1} />
@@ -146,12 +195,26 @@ function Structure() {
         <planeGeometry args={[5.6, 3.8]} />
         <meshStandardMaterial color={C.rugTrim} roughness={1} />
       </mesh>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.022, -0.4]} receiveShadow>
+        <planeGeometry args={[4.2, 2.6]} />
+        <meshStandardMaterial color="#63503e" roughness={1} />
+      </mesh>
+      {/* Fringe at both ends */}
+      {[-2.72, 2.72].map((z) => (
+        <mesh key={z} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.014, -0.4 + z]}>
+          <planeGeometry args={[6.3, 0.12]} />
+          <meshStandardMaterial color="#7a6450" roughness={1} />
+        </mesh>
+      ))}
 
-      {/* Ceiling */}
+      {/* Ceiling, with joists */}
       <mesh rotation={[Math.PI / 2, 0, 0]} position={[0, height, midZ]} receiveShadow>
         <planeGeometry args={[halfWidth * 2, depth]} />
         <meshStandardMaterial color={C.ceiling} roughness={1} />
       </mesh>
+      {Array.from({ length: 7 }, (_, i) => backZ + 0.9 + i * 1.5).map((z) => (
+        <Box key={z} position={[0, height - 0.06, z]} size={[halfWidth * 2, 0.12, 0.16]} colour="#464d5c" />
+      ))}
 
       {/* Back wall, two-tone with a dado rail — a flat wall reads as a backdrop, a split one as a room */}
       <mesh position={[0, 0.9, backZ]} receiveShadow>
@@ -164,6 +227,11 @@ function Structure() {
       </mesh>
       <Box position={[0, 1.8, backZ + 0.06]} size={[halfWidth * 2, 0.12, 0.12]} colour={C.woodDark} />
       <Box position={[0, 0.1, backZ + 0.06]} size={[halfWidth * 2, 0.2, 0.14]} colour={C.skirting} />
+      {/* Picture rail near the top, and panelling below the dado */}
+      <Box position={[0, 3.9, backZ + 0.05]} size={[halfWidth * 2, 0.07, 0.1]} colour={C.woodDark} />
+      {Array.from({ length: 8 }, (_, i) => -5.25 + i * 1.5).map((x) => (
+        <Box key={x} position={[x, 0.95, backZ + 0.04]} size={[1.2, 1.3, 0.04]} colour="#565f72" />
+      ))}
 
       {/* Left wall */}
       <mesh rotation={[0, Math.PI / 2, 0]} position={[-halfWidth, height / 2, midZ]} receiveShadow>
@@ -171,6 +239,7 @@ function Structure() {
         <meshStandardMaterial color={C.wallLower} roughness={0.96} />
       </mesh>
       <Box position={[-halfWidth + 0.07, 0.1, midZ]} size={[0.14, 0.2, depth]} colour={C.skirting} />
+      <Box position={[-halfWidth + 0.06, 3.9, midZ]} size={[0.1, 0.07, depth]} colour={C.woodDark} />
 
       {/* Right wall */}
       <mesh rotation={[0, -Math.PI / 2, 0]} position={[halfWidth, height / 2, midZ]} receiveShadow>
@@ -178,6 +247,7 @@ function Structure() {
         <meshStandardMaterial color={C.wallLower} roughness={0.96} />
       </mesh>
       <Box position={[halfWidth - 0.07, 0.1, midZ]} size={[0.14, 0.2, depth]} colour={C.skirting} />
+      <Box position={[halfWidth - 0.06, 3.9, midZ]} size={[0.1, 0.07, depth]} colour={C.woodDark} />
 
       {/* Front wall, behind the spawn — needed now that the player can turn all the way round */}
       <mesh rotation={[0, Math.PI, 0]} position={[0, height / 2, frontZ]} receiveShadow>
@@ -185,35 +255,58 @@ function Structure() {
         <meshStandardMaterial color={C.wallUpper} roughness={0.96} />
       </mesh>
       <Box position={[0, 0.1, frontZ - 0.07]} size={[halfWidth * 2, 0.2, 0.14]} colour={C.skirting} />
+      <Box position={[0, 3.9, frontZ - 0.05]} size={[halfWidth * 2, 0.07, 0.1]} colour={C.woodDark} />
     </group>
   );
 }
 
-/** Writing desk, chair, lamp, mug, paperwork. The torch hides on the floor beneath it. */
-function Desk() {
+/** The message the desk lamp blinks, on a loop, for anyone patient enough to read it. */
+const LAMP_MESSAGE = "Welcome to LICET";
+/** Seconds per Morse unit. Slow enough to read, fast enough that the loop comes round. */
+const LAMP_UNIT_SECONDS = 0.19;
+
+const LAMP_DARK = new Color("#3a2f1e");
+const LAMP_LIT = new Color("#ffe9c4");
+
+/**
+ * The banker's lamp, blinking Morse.
+ *
+ * Driven imperatively from useFrame rather than from React state. A blink is a
+ * change every few frames; routing that through setState would re-render this
+ * subtree for the entire life of the room and buy nothing, since the only
+ * things that change are one material colour and one light intensity.
+ *
+ * The transition is eased rather than switched, because a hard on/off looks
+ * like a rendering glitch while a filament that takes a moment to come up and
+ * die away reads as a lamp. The easing is fast enough (~40ms to most of the
+ * way) that a dot is still plainly a dot.
+ *
+ * What it says is in @/lib/hunt/morse, with tests. See that file for why the
+ * encoding is not just an array of numbers written out by hand here.
+ */
+function MorseLamp() {
+  const bulb = useRef<Mesh>(null);
+  const light = useRef<PointLight>(null);
+  const level = useRef(0);
+  const spans = useMemo(() => toSpans(LAMP_MESSAGE), []);
+
+  useFrame((state, delta) => {
+    const on = isOnAt(spans, state.clock.elapsedTime / LAMP_UNIT_SECONDS);
+    // Frame-rate independent approach, so the lamp looks the same at 30fps and
+    // at 144, and cannot overshoot at a long frame the way a fixed lerp does.
+    const k = 1 - Math.exp(-Math.min(delta, 0.1) * 26);
+    level.current += ((on ? 1 : 0) - level.current) * k;
+
+    const material = bulb.current?.material as MeshBasicMaterial | undefined;
+    if (material) material.color.lerpColors(LAMP_DARK, LAMP_LIT, level.current);
+    if (light.current) light.current.intensity = 0.5 + level.current * 6.5;
+  });
+
   return (
-    <group position={[-2.2, 0, -3.0]} rotation={[0, 0.18, 0]}>
-      {/* Top surface lands at exactly y=0.6 */}
-      <Box position={[0, 0.55, 0]} size={[2.6, 0.1, 1.1]} colour={C.wood} />
-      <Box position={[-1.15, 0.25, 0]} size={[0.12, 0.5, 1.0]} colour={C.woodDark} />
-      <Box position={[0.72, 0.25, 0]} size={[0.8, 0.5, 1.0]} colour={C.woodDark} />
-      {[0.12, 0.3, 0.46].map((y) => (
-        <group key={y}>
-          <Box position={[0.72, y, 0.51]} size={[0.7, 0.13, 0.03]} colour={C.woodPale} />
-          <Box position={[0.72, y, 0.54]} size={[0.16, 0.03, 0.03]} colour={C.brass} metalness={0.6} roughness={0.4} />
-        </group>
-      ))}
-
-      {/* Paperwork and a mug */}
-      <Box position={[-0.55, 0.61, 0.1]} size={[0.5, 0.02, 0.36]} colour={C.paper} rotation={[0, 0.3, 0]} />
-      <Box position={[-0.45, 0.63, 0.02]} size={[0.44, 0.02, 0.32]} colour={C.paperAged} rotation={[0, -0.15, 0]} />
-      <mesh position={[-0.05, 0.66, -0.32]} castShadow>
-        <cylinderGeometry args={[0.07, 0.06, 0.12, 14]} />
-        <meshStandardMaterial color={C.paper} roughness={0.5} />
-      </mesh>
-
-      {/* Banker's lamp */}
+    <group>
+      {/* Base, stem and shade */}
       <Box position={[-1.0, 0.63, -0.3]} size={[0.24, 0.04, 0.24]} colour={C.metalDark} />
+      <Box position={[-1.0, 0.66, -0.3]} size={[0.19, 0.03, 0.19]} colour={C.brass} metalness={0.6} roughness={0.35} />
       <mesh position={[-1.0, 0.85, -0.3]} rotation={[0, 0, 0.35]} castShadow>
         <cylinderGeometry args={[0.02, 0.02, 0.44, 8]} />
         <meshStandardMaterial color={C.metalDark} roughness={0.6} metalness={0.4} />
@@ -222,16 +315,181 @@ function Desk() {
         <coneGeometry args={[0.17, 0.2, 14, 1, true]} />
         <meshStandardMaterial color={C.green} roughness={0.5} metalness={0.3} side={2} />
       </mesh>
-      <mesh position={[-0.86, 0.94, -0.3]}>
-        <sphereGeometry args={[0.07, 10, 10]} />
-        <meshBasicMaterial color="#ffe9c4" />
+      {/* Shade rim, so the cone has an edge rather than fading to nothing */}
+      <mesh position={[-0.878, 0.945, -0.3]} rotation={[Math.PI / 2, 0, 0.5]}>
+        <torusGeometry args={[0.168, 0.008, 6, 20]} />
+        <meshStandardMaterial color={C.brass} metalness={0.7} roughness={0.35} />
       </mesh>
-      <pointLight position={[-0.86, 0.9, -0.3]} intensity={4} distance={4.5} color="#ffcf8f" />
+      {/* Pull chain */}
+      <mesh position={[-0.72, 0.86, -0.3]}>
+        <cylinderGeometry args={[0.004, 0.004, 0.18, 5]} />
+        <meshStandardMaterial color={C.brass} metalness={0.7} roughness={0.4} />
+      </mesh>
+
+      <mesh ref={bulb} position={[-0.86, 0.94, -0.3]}>
+        <sphereGeometry args={[0.07, 12, 12]} />
+        <meshBasicMaterial color={LAMP_DARK} />
+      </mesh>
+      <pointLight ref={light} position={[-0.86, 0.9, -0.3]} intensity={0.5} distance={4.5} color="#ffcf8f" />
+    </group>
+  );
+}
+
+/** A typewriter, because a desk with nothing on it is a table. */
+function Typewriter() {
+  return (
+    <group position={[0.05, 0.6, 0.06]} rotation={[0, -0.22, 0]}>
+      {/* Body, sloping toward the keys */}
+      <Box position={[0, 0.09, -0.06]} size={[0.44, 0.18, 0.3]} colour={C.ink} roughness={0.5} />
+      <Box position={[0, 0.05, 0.14]} size={[0.42, 0.06, 0.14]} colour={C.ink} roughness={0.5} />
+      {/* Platen and its knobs */}
+      <mesh position={[0, 0.21, -0.12]} rotation={[0, 0, Math.PI / 2]} castShadow>
+        <cylinderGeometry args={[0.035, 0.035, 0.42, 14]} />
+        <meshStandardMaterial color="#2a2a2a" roughness={0.75} />
+      </mesh>
+      {[-0.23, 0.23].map((x) => (
+        <mesh key={x} position={[x, 0.21, -0.12]} rotation={[0, 0, Math.PI / 2]}>
+          <cylinderGeometry args={[0.05, 0.05, 0.03, 12]} />
+          <meshStandardMaterial color={C.metalDark} metalness={0.5} roughness={0.45} />
+        </mesh>
+      ))}
+      {/* A sheet still in it */}
+      <Box position={[0, 0.31, -0.14]} size={[0.3, 0.22, 0.004]} colour={C.paper} rotation={[0.22, 0, 0]} />
+      {/* Three rows of round keys */}
+      {[0, 1, 2].map((row) =>
+        Array.from({ length: 9 }, (_, i) => (
+          <mesh
+            key={`${row}:${i}`}
+            position={[-0.16 + i * 0.04, 0.09 + row * 0.018, 0.16 - row * 0.035]}
+          >
+            <cylinderGeometry args={[0.014, 0.014, 0.012, 8]} />
+            <meshStandardMaterial color={row === 2 ? "#d9d2c4" : "#c9c2b4"} roughness={0.6} />
+          </mesh>
+        ))
+      )}
+      {/* Carriage return lever */}
+      <mesh position={[-0.26, 0.24, -0.1]} rotation={[0, 0, 0.9]}>
+        <cylinderGeometry args={[0.008, 0.008, 0.16, 6]} />
+        <meshStandardMaterial color={C.metal} metalness={0.6} roughness={0.4} />
+      </mesh>
+    </group>
+  );
+}
+
+/** A candlestick telephone on the corner of the desk. */
+function Telephone() {
+  return (
+    <group position={[0.95, 0.6, -0.3]} rotation={[0, 0.4, 0]}>
+      <mesh position={[0, 0.02, 0]} castShadow>
+        <cylinderGeometry args={[0.11, 0.13, 0.04, 16]} />
+        <meshStandardMaterial color={C.ink} roughness={0.5} />
+      </mesh>
+      <mesh position={[0, 0.16, 0]} castShadow>
+        <cylinderGeometry args={[0.022, 0.035, 0.26, 12]} />
+        <meshStandardMaterial color={C.ink} roughness={0.5} />
+      </mesh>
+      {/* Mouthpiece */}
+      <mesh position={[0, 0.3, 0.03]} rotation={[Math.PI / 2.4, 0, 0]}>
+        <coneGeometry args={[0.055, 0.08, 14, 1, true]} />
+        <meshStandardMaterial color={C.ink} roughness={0.5} side={2} />
+      </mesh>
+      {/* Handset resting across the cradle */}
+      <mesh position={[0, 0.33, -0.04]} rotation={[0, 0, Math.PI / 2]}>
+        <cylinderGeometry args={[0.018, 0.018, 0.2, 10]} />
+        <meshStandardMaterial color={C.ink} roughness={0.55} />
+      </mesh>
+      {[-0.1, 0.1].map((x) => (
+        <mesh key={x} position={[x, 0.33, -0.04]} rotation={[Math.PI / 2, 0, 0]}>
+          <coneGeometry args={[0.035, 0.05, 12]} />
+          <meshStandardMaterial color={C.ink} roughness={0.55} />
+        </mesh>
+      ))}
+      {/* Dial */}
+      <mesh position={[0, 0.05, 0.1]} rotation={[Math.PI / 2.6, 0, 0]}>
+        <torusGeometry args={[0.05, 0.012, 8, 20]} />
+        <meshStandardMaterial color={C.brass} metalness={0.6} roughness={0.4} />
+      </mesh>
+      {/* Cord, coiled on the desk */}
+      {[0.05, 0.09, 0.13].map((r) => (
+        <mesh key={r} position={[-0.16, 0.004, 0.14]} rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[r, 0.008, 5, 18]} />
+          <meshStandardMaterial color="#1a1d22" roughness={0.9} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+/** Writing desk, chair, Morse lamp, typewriter, telephone, paperwork. */
+function Desk() {
+  return (
+    <group position={[-2.2, 0, -3.0]} rotation={[0, 0.18, 0]}>
+      {/* Top surface lands at exactly y=0.6 */}
+      <Box position={[0, 0.55, 0]} size={[2.6, 0.1, 1.1]} colour={C.wood} />
+      {/* Moulded lip along the front edge */}
+      <Box position={[0, 0.52, 0.56]} size={[2.6, 0.05, 0.04]} colour={C.woodPale} />
+      <Box position={[-1.15, 0.25, 0]} size={[0.12, 0.5, 1.0]} colour={C.woodDark} />
+      <Box position={[0.72, 0.25, 0]} size={[0.8, 0.5, 1.0]} colour={C.woodDark} />
+      {/* Modesty panel, so the desk is not four legs and a floating slab */}
+      <Box position={[-0.25, 0.34, -0.48]} size={[1.9, 0.32, 0.04]} colour={C.woodDark} />
+      {[0.12, 0.3, 0.46].map((y) => (
+        <group key={y}>
+          <Box position={[0.72, y, 0.51]} size={[0.7, 0.13, 0.03]} colour={C.woodPale} />
+          <Box position={[0.72, y, 0.54]} size={[0.16, 0.03, 0.03]} colour={C.brass} metalness={0.6} roughness={0.4} />
+          {/* Keyhole escutcheon */}
+          <mesh position={[0.45, y, 0.54]}>
+            <cylinderGeometry args={[0.012, 0.012, 0.01, 8]} />
+            <meshStandardMaterial color={C.brass} metalness={0.7} roughness={0.35} />
+          </mesh>
+        </group>
+      ))}
+
+      {/* Leather blotter, paperwork, inkwell, pen */}
+      <Box position={[-0.5, 0.605, 0.08]} size={[0.78, 0.012, 0.5]} colour="#4a3a30" roughness={1} />
+      {[-0.34, 0.34].map((x) => (
+        <Box key={x} position={[-0.5 + x, 0.61, 0.08]} size={[0.09, 0.016, 0.5]} colour={C.woodDark} />
+      ))}
+      <Box position={[-0.55, 0.62, 0.1]} size={[0.5, 0.02, 0.36]} colour={C.paper} rotation={[0, 0.3, 0]} />
+      <Box position={[-0.45, 0.64, 0.02]} size={[0.44, 0.02, 0.32]} colour={C.paperAged} rotation={[0, -0.15, 0]} />
+      <mesh position={[-0.9, 0.63, 0.22]} castShadow>
+        <cylinderGeometry args={[0.045, 0.05, 0.06, 12]} />
+        <meshStandardMaterial color="#1b2430" roughness={0.35} metalness={0.2} />
+      </mesh>
+      <mesh position={[-0.86, 0.7, 0.24]} rotation={[0.5, 0, 0.6]}>
+        <cylinderGeometry args={[0.004, 0.012, 0.2, 6]} />
+        <meshStandardMaterial color="#c8c2b4" roughness={0.6} />
+      </mesh>
+      {/* Mug, with a handle */}
+      <mesh position={[-0.05, 0.66, -0.32]} castShadow>
+        <cylinderGeometry args={[0.07, 0.06, 0.12, 14]} />
+        <meshStandardMaterial color={C.paper} roughness={0.5} />
+      </mesh>
+      <mesh position={[0.03, 0.66, -0.32]} rotation={[0, Math.PI / 2, 0]}>
+        <torusGeometry args={[0.04, 0.009, 6, 14]} />
+        <meshStandardMaterial color={C.paper} roughness={0.5} />
+      </mesh>
+      <mesh position={[-0.05, 0.715, -0.32]}>
+        <cylinderGeometry args={[0.062, 0.062, 0.005, 14]} />
+        <meshStandardMaterial color="#4a3524" roughness={0.3} />
+      </mesh>
+
+      <MorseLamp />
+      <Typewriter />
+      <Telephone />
 
       {/* Chair, pushed out from the desk */}
       <group position={[-0.7, 0, 1.15]} rotation={[0, -0.35, 0]}>
         <Box position={[0, 0.46, 0]} size={[0.52, 0.07, 0.52]} colour={C.woodPale} />
+        {/* Cushion */}
+        <Box position={[0, 0.51, 0.01]} size={[0.46, 0.05, 0.44]} colour={C.cloth} roughness={1} />
         <Box position={[0, 0.76, -0.24]} size={[0.5, 0.55, 0.06]} colour={C.woodPale} />
+        {/* Spindles in the back */}
+        {[-0.16, 0, 0.16].map((x) => (
+          <mesh key={x} position={[x, 0.72, -0.21]}>
+            <cylinderGeometry args={[0.018, 0.018, 0.42, 8]} />
+            <meshStandardMaterial color={C.woodDark} roughness={0.8} />
+          </mesh>
+        ))}
         {[
           [-0.21, -0.21],
           [0.21, -0.21],
@@ -240,12 +498,16 @@ function Desk() {
         ].map(([x, z]) => (
           <Box key={`${x}:${z}`} position={[x, 0.22, z]} size={[0.05, 0.44, 0.05]} colour={C.woodDark} />
         ))}
+        {/* Stretchers between the legs */}
+        {[-0.21, 0.21].map((z) => (
+          <Box key={z} position={[0, 0.14, z]} size={[0.42, 0.035, 0.035]} colour={C.woodDark} />
+        ))}
       </group>
     </group>
   );
 }
 
-/** Four-shelf bookcase, uneven ledgers, a globe and a wind-up clock. */
+/** Four-shelf bookcase, uneven ledgers, a globe, a card box and floor stacks. */
 function Bookcase() {
   const shelfYs = [0.35, 1.065, 1.85, 2.6];
   return (
@@ -254,8 +516,15 @@ function Bookcase() {
       <Box position={[-1.06, 1.55, 0]} size={[0.08, 3.1, 0.56]} colour={C.woodDark} />
       <Box position={[1.06, 1.55, 0]} size={[0.08, 3.1, 0.56]} colour={C.woodDark} />
       <Box position={[0, 3.06, 0]} size={[2.2, 0.1, 0.56]} colour={C.wood} />
+      {/* Cornice and plinth */}
+      <Box position={[0, 3.15, 0.02]} size={[2.34, 0.09, 0.64]} colour={C.woodPale} />
+      <Box position={[0, 0.08, 0.02]} size={[2.26, 0.16, 0.6]} colour={C.woodPale} />
       {shelfYs.map((y) => (
         <Box key={y} position={[0, y, 0]} size={[2.04, 0.07, 0.56]} colour={C.wood} />
+      ))}
+      {/* Shelf edge beading */}
+      {shelfYs.map((y) => (
+        <Box key={`lip-${y}`} position={[0, y + 0.05, 0.27]} size={[2.04, 0.03, 0.02]} colour={C.woodPale} />
       ))}
       <Ledgers y={0.35} />
       <Ledgers y={1.85} skip />
@@ -267,9 +536,28 @@ function Bookcase() {
           <sphereGeometry args={[0.16, 18, 18]} />
           <meshStandardMaterial color="#3d6b8a" roughness={0.7} />
         </mesh>
+        {/* Suggestion of land masses */}
+        {[
+          [0.4, 0.6],
+          [-0.9, 0.2],
+          [2.1, -0.5],
+        ].map(([a, b]) => (
+          <mesh
+            key={`${a}:${b}`}
+            position={[Math.cos(b) * Math.sin(a) * 0.161, Math.sin(b) * 0.161, Math.cos(b) * Math.cos(a) * 0.161]}
+            rotation={[-b, a, 0]}
+          >
+            <circleGeometry args={[0.06, 8]} />
+            <meshStandardMaterial color="#6b7f52" roughness={0.9} />
+          </mesh>
+        ))}
         <mesh rotation={[0, 0, 0.4]}>
           <torusGeometry args={[0.19, 0.012, 8, 24]} />
           <meshStandardMaterial color={C.brass} metalness={0.7} roughness={0.35} />
+        </mesh>
+        <mesh position={[0, -0.2, 0]}>
+          <cylinderGeometry args={[0.07, 0.09, 0.03, 12]} />
+          <meshStandardMaterial color={C.woodDark} roughness={0.8} />
         </mesh>
       </group>
 
@@ -283,7 +571,44 @@ function Bookcase() {
           <cylinderGeometry args={[0.11, 0.11, 0.02, 20]} />
           <meshStandardMaterial color={C.paper} roughness={0.9} />
         </mesh>
+        {/* Bells and feet */}
+        {[-0.11, 0.11].map((x) => (
+          <mesh key={x} position={[x, 0.09, 0]}>
+            <sphereGeometry args={[0.045, 10, 10]} />
+            <meshStandardMaterial color={C.brass} metalness={0.7} roughness={0.35} />
+          </mesh>
+        ))}
       </group>
+
+      {/* Books lying flat and leaning, so no shelf is a solid painted block */}
+      <Box position={[-0.55, 1.94, 0.04]} size={[0.32, 0.05, 0.24]} colour="#7b4d72" />
+      <Box position={[-0.53, 1.99, 0.05]} size={[0.28, 0.04, 0.22]} colour="#47605a" />
+      <Box position={[-0.2, 1.99, 0.03]} size={[0.06, 0.34, 0.22]} colour="#8c4a3f" rotation={[0, 0, 0.42]} />
+
+      {/* Card box on the bottom shelf */}
+      <group position={[-0.7, 0.52, 0.06]}>
+        <Box position={[0, 0, 0]} size={[0.42, 0.2, 0.3]} colour={C.woodDark} />
+        <Box position={[0, 0.02, 0.16]} size={[0.2, 0.06, 0.01]} colour={C.paper} />
+      </group>
+
+      {/* Stacks of books on the floor beside it — inside the bookcase footprint,
+          so they never become something to walk into */}
+      {[
+        { x: -0.75, z: 0.22, n: 4, tilt: 0.06 },
+        { x: 1.0, z: 0.16, n: 3, tilt: -0.09 },
+      ].map((stack) => (
+        <group key={stack.x} position={[stack.x, 0, stack.z]} rotation={[0, stack.tilt * 4, 0]}>
+          {Array.from({ length: stack.n }, (_, i) => (
+            <Box
+              key={i}
+              position={[0, 0.03 + i * 0.055, 0]}
+              size={[0.26, 0.05, 0.19]}
+              colour={["#8c4a3f", "#3f5b7a", "#6b6b52", "#96683a"][i % 4]}
+              rotation={[0, i * stack.tilt, 0]}
+            />
+          ))}
+        </group>
+      ))}
     </group>
   );
 }
@@ -312,14 +637,20 @@ function Ledgers({ y, skip = false }: { y: number; skip?: boolean }) {
   return (
     <group>
       {spines.map((s) => (
-        <Box
-          key={`${y}-${s.x}`}
-          position={[s.x, y + 0.04 + s.h / 2, 0.02]}
-          size={[s.w, s.h, 0.34]}
-          colour={s.colour}
-          rotation={[0, 0, s.tilt]}
-          roughness={0.95}
-        />
+        <group key={`${y}-${s.x}`}>
+          <Box
+            position={[s.x, y + 0.04 + s.h / 2, 0.02]}
+            size={[s.w, s.h, 0.34]}
+            colour={s.colour}
+            rotation={[0, 0, s.tilt]}
+            roughness={0.95}
+          />
+          {/* Gilt band on the spine — the detail that makes a coloured box a book */}
+          <mesh position={[s.x, y + 0.04 + s.h * 0.78, 0.191]} rotation={[0, 0, s.tilt]}>
+            <planeGeometry args={[s.w * 0.62, 0.018]} />
+            <meshStandardMaterial color={C.brass} metalness={0.6} roughness={0.45} />
+          </mesh>
+        </group>
       ))}
     </group>
   );
@@ -362,14 +693,18 @@ function Crate({
           <Box key={`${y}:${slat.p.join()}`} position={slat.p} size={slat.s} colour={colour} />
         ))
       )}
-      {/* Lid */}
+      {/* Lid, with a stencilled band */}
       <Box position={[0, h, 0]} size={[size + t, t * 1.4, size + t]} colour={C.woodDark} />
+      <mesh position={[0, h + t * 0.75, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <planeGeometry args={[size * 0.5, size * 0.16]} />
+        <meshStandardMaterial color="#3a3129" roughness={1} />
+      </mesh>
     </group>
   );
 }
 
 /**
- * Crates, a barrel and a pallet in the near-left corner of the floor.
+ * Crates, an open barrel, a pallet and a rope coil in the near-left corner.
  *
  * Pushed left of the room's centre line on purpose: parked in the middle it
  * sat a metre and a half from the spawn point and filled the opening view,
@@ -383,21 +718,49 @@ function Storage() {
       {[-0.55, 0, 0.55].map((z) => (
         <Box key={z} position={[0, 0.11, z]} size={[1.45, 0.03, 0.22]} colour={C.woodPale} />
       ))}
+      {[-0.6, 0, 0.6].map((x) => (
+        <Box key={x} position={[x, 0.02, 0]} size={[0.14, 0.04, 1.18]} colour={C.woodDark} />
+      ))}
 
       <Crate position={[1.2, 0, -0.35]} rotation={0.42} size={0.72} />
       <Crate position={[1.15, 0.79, -0.3]} rotation={-0.2} size={0.5} colour={C.woodPale} />
       <Crate position={[-1.3, 0, 0.25]} rotation={-0.3} size={0.62} colour={C.woodPale} />
 
-      {/* Barrel */}
+      {/* Barrel, open at the top with sacking stuffed in it */}
       <group position={[-1.35, 0, -0.8]}>
-        <mesh position={[0, 0.42, 0]} castShadow>
-          <cylinderGeometry args={[0.34, 0.31, 0.84, 18]} />
-          <meshStandardMaterial color={C.woodDark} roughness={0.9} />
+        <mesh position={[0, 0.42, 0]} castShadow receiveShadow>
+          <cylinderGeometry args={[0.34, 0.31, 0.84, 18, 1, true]} />
+          <meshStandardMaterial color={C.woodDark} roughness={0.9} side={2} />
         </mesh>
-        {[0.16, 0.42, 0.68].map((y) => (
+        <mesh position={[0, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <circleGeometry args={[0.31, 18]} />
+          <meshStandardMaterial color="#4a3524" roughness={1} />
+        </mesh>
+        {[0.16, 0.42, 0.68, 0.83].map((y) => (
           <mesh key={y} position={[0, y, 0]}>
             <torusGeometry args={[0.335, 0.02, 6, 20]} />
             <meshStandardMaterial color={C.metal} metalness={0.6} roughness={0.4} />
+          </mesh>
+        ))}
+        {/* Sacking */}
+        {[
+          [0.0, 0.0, 0.2],
+          [0.14, 0.1, 0.15],
+          [-0.12, -0.08, 0.13],
+        ].map(([x, z, r]) => (
+          <mesh key={`${x}:${z}`} position={[x, 0.72, z]} castShadow>
+            <sphereGeometry args={[r, 10, 8]} />
+            <meshStandardMaterial color="#8b7a5e" roughness={1} />
+          </mesh>
+        ))}
+      </group>
+
+      {/* Coil of rope */}
+      <group position={[0.15, 0, 0.44]}>
+        {[0.2, 0.15, 0.1].map((r, i) => (
+          <mesh key={r} position={[0, 0.13 + i * 0.05, 0]} rotation={[Math.PI / 2, 0, i * 0.4]}>
+            <torusGeometry args={[r, 0.026, 6, 22]} />
+            <meshStandardMaterial color="#9a8462" roughness={1} />
           </mesh>
         ))}
       </group>
@@ -406,8 +769,13 @@ function Storage() {
 }
 
 /**
- * Filing cabinets along the left wall. The middle one's top drawer is open —
- * that is where the blue film sits, so it takes a walk over here to find.
+ * Filing cabinets along the left wall.
+ *
+ * The middle cabinet's top drawer is pulled out and full of hanging files.
+ * That drawer used to be where the blue gel sat; it is now empty of anything
+ * that matters and stays open purely as a decoy, because the obvious hiding
+ * place being obviously empty is what sends a player looking upward — which is
+ * where the book actually is (see MysteryRoomTools.tsx).
  */
 function FilingCabinets() {
   return (
@@ -415,6 +783,8 @@ function FilingCabinets() {
       {[-1.3, 0, 1.3].map((z, idx) => (
         <group key={z} position={[0, 0, z]}>
           <Box position={[0, 0.8, 0]} size={[1.4, 1.6, 1.15]} colour={C.metal} metalness={0.35} roughness={0.55} />
+          {/* Plinth, so the carcass is not sunk into the floor */}
+          <Box position={[0, 0.03, 0]} size={[1.32, 0.06, 1.08]} colour={C.metalDark} />
           {[0.35, 0.8, 1.25].map((y) => {
             // Middle cabinet, top drawer: pulled out.
             const open = idx === 1 && y === 1.25;
@@ -423,6 +793,9 @@ function FilingCabinets() {
               <group key={y} position={[out, 0, 0]}>
                 <Box position={[0.71, y, 0]} size={[0.04, 0.36, 1.0]} colour={C.metalDark} />
                 <Box position={[0.74, y, 0]} size={[0.05, 0.06, 0.32]} colour={C.brass} metalness={0.6} roughness={0.35} />
+                {/* Label card in its holder */}
+                <Box position={[0.74, y + 0.11, 0]} size={[0.02, 0.06, 0.34]} colour={C.metalDark} />
+                <Box position={[0.755, y + 0.11, 0]} size={[0.004, 0.04, 0.3]} colour={C.paperAged} />
                 {open && (
                   <group>
                     {/* Drawer walls, so the open one is a container and not a floating face */}
@@ -439,6 +812,10 @@ function FilingCabinets() {
                         rotation={[0.08, 0, 0]}
                       />
                     ))}
+                    {/* Tabs along the top of the files */}
+                    {[-0.24, 0.02, 0.26].map((fz) => (
+                      <Box key={`tab${fz}`} position={[0.5, y + 0.17, fz]} size={[0.12, 0.04, 0.02]} colour={C.paper} />
+                    ))}
                   </group>
                 )}
               </group>
@@ -446,15 +823,30 @@ function FilingCabinets() {
           })}
         </group>
       ))}
-      {/* Boxes of files stacked on top */}
+      {/* Boxes of files stacked on top. The gap between them is where the book
+          sits — see BOOK_HOME in MysteryRoomTools.tsx. */}
       <Box position={[0, 1.78, -1.3]} size={[0.9, 0.36, 0.7]} colour={C.paperAged} rotation={[0, 0.3, 0]} roughness={1} />
+      <Box position={[0, 1.97, -1.3]} size={[0.94, 0.04, 0.74]} colour="#c9bc9e" rotation={[0, 0.3, 0]} roughness={1} />
       <Box position={[0.1, 1.76, 1.2]} size={[0.8, 0.32, 0.6]} colour={C.woodDark} rotation={[0, -0.2, 0]} />
       <Box position={[0.05, 1.96, 1.24]} size={[0.6, 0.08, 0.45]} colour={C.paper} rotation={[0, -0.1, 0]} />
+      {/* A dead pot plant on the far end, because every office has one */}
+      <group position={[-0.1, 1.6, 1.9]}>
+        <mesh position={[0, 0.1, 0]} castShadow>
+          <cylinderGeometry args={[0.11, 0.08, 0.2, 12]} />
+          <meshStandardMaterial color="#8a5a44" roughness={0.9} />
+        </mesh>
+        {[0.4, 2.1, 4.0].map((a) => (
+          <mesh key={a} position={[Math.cos(a) * 0.04, 0.3, Math.sin(a) * 0.04]} rotation={[0.5, a, 0.4]}>
+            <cylinderGeometry args={[0.004, 0.012, 0.26, 5]} />
+            <meshStandardMaterial color="#6b6047" roughness={1} />
+          </mesh>
+        ))}
+      </group>
     </group>
   );
 }
 
-/** Metal table, CRT terminal, keyboard, cable runs. */
+/** Metal table, CRT terminal, tape deck, punch cards, cable runs. */
 function TerminalDesk() {
   return (
     <group position={[0.2, 0, -4.3]}>
@@ -463,10 +855,24 @@ function TerminalDesk() {
       <Box position={[-1.08, 0.31, 0]} size={[0.08, 0.62, 0.9]} colour={C.metal} />
       <Box position={[1.08, 0.31, 0]} size={[0.08, 0.62, 0.9]} colour={C.metal} />
       <Box position={[0, 0.16, -0.4]} size={[2.2, 0.06, 0.2]} colour={C.metal} />
+      {/* Cross-brace and levelling feet */}
+      <Box position={[0, 0.58, -0.42]} size={[2.2, 0.05, 0.05]} colour={C.metal} />
+      {[-1.08, 1.08].map((x) =>
+        [-0.4, 0.4].map((z) => (
+          <mesh key={`${x}:${z}`} position={[x, 0.02, z]}>
+            <cylinderGeometry args={[0.04, 0.05, 0.04, 10]} />
+            <meshStandardMaterial color={C.ink} roughness={0.9} />
+          </mesh>
+        ))
+      )}
 
       <group position={[-0.8, 0.7, -0.05]} rotation={[0, 0.5, 0]}>
         <Box position={[0, 0.34, 0]} size={[0.78, 0.66, 0.66]} colour={C.metalDark} />
         <Box position={[0, 0.34, 0.34]} size={[0.7, 0.58, 0.04]} colour="#20262c" />
+        {/* Vent slots in the top of the casing */}
+        {[-0.18, -0.06, 0.06, 0.18].map((z) => (
+          <Box key={z} position={[0, 0.68, z]} size={[0.5, 0.01, 0.03]} colour="#171b20" />
+        ))}
         <mesh position={[0, 0.36, 0.37]}>
           <planeGeometry args={[0.58, 0.44]} />
           <meshStandardMaterial color={C.screen} emissive={C.screen} emissiveIntensity={1.1} roughness={0.4} />
@@ -478,8 +884,26 @@ function TerminalDesk() {
             <meshBasicMaterial color="#0d3f38" />
           </mesh>
         ))}
+        {/* Bezel controls */}
+        {[-0.22, -0.14].map((x) => (
+          <mesh key={x} position={[x, 0.06, 0.38]} rotation={[Math.PI / 2, 0, 0]}>
+            <cylinderGeometry args={[0.02, 0.02, 0.02, 10]} />
+            <meshStandardMaterial color={C.metal} metalness={0.5} roughness={0.5} />
+          </mesh>
+        ))}
         <pointLight position={[0, 0.36, 0.7]} intensity={2.2} distance={3} color="#5ce0c8" />
         <Box position={[0, 0.02, 0.62]} size={[0.72, 0.05, 0.26]} colour={C.metal} />
+        {/* Keys on the keyboard slab */}
+        {[0, 1, 2, 3].map((row) =>
+          Array.from({ length: 12 }, (_, i) => (
+            <Box
+              key={`${row}:${i}`}
+              position={[-0.31 + i * 0.056, 0.05, 0.55 + row * 0.045]}
+              size={[0.04, 0.012, 0.033]}
+              colour="#39414a"
+            />
+          ))
+        )}
         {/* Cable from the CRT down the back of the table */}
         <mesh position={[0, -0.3, -0.3]} rotation={[0.2, 0, 0]}>
           <cylinderGeometry args={[0.02, 0.02, 0.7, 6]} />
@@ -487,13 +911,50 @@ function TerminalDesk() {
         </mesh>
       </group>
 
+      {/* Tape deck: two reels behind glass */}
+      <group position={[0.15, 0.7, -0.2]} rotation={[0, -0.15, 0]}>
+        <Box position={[0, 0.16, 0]} size={[0.5, 0.32, 0.3]} colour={C.enamel} roughness={0.5} />
+        {[-0.11, 0.11].map((x) => (
+          <group key={x} position={[x, 0.2, 0.16]}>
+            <mesh rotation={[Math.PI / 2, 0, 0]}>
+              <cylinderGeometry args={[0.075, 0.075, 0.015, 16]} />
+              <meshStandardMaterial color="#5a5f68" metalness={0.4} roughness={0.5} />
+            </mesh>
+            <mesh rotation={[Math.PI / 2, 0, 0]} position={[0, 0, 0.008]}>
+              <cylinderGeometry args={[0.055, 0.055, 0.012, 16]} />
+              <meshStandardMaterial color="#2b2f36" roughness={0.8} />
+            </mesh>
+          </group>
+        ))}
+        {[-0.15, -0.05, 0.05].map((x) => (
+          <mesh key={x} position={[x, 0.05, 0.16]}>
+            <cylinderGeometry args={[0.012, 0.012, 0.01, 8]} />
+            <meshStandardMaterial
+              color={x === -0.15 ? "#c8352f" : "#3f7bff"}
+              emissive={x === -0.15 ? "#c8352f" : "#1f4fbf"}
+              emissiveIntensity={0.8}
+            />
+          </mesh>
+        ))}
+      </group>
+
       {/* Card index box on the other end */}
-      <group position={[0.85, 0.7, 0]} rotation={[0, -0.3, 0]}>
+      <group position={[0.85, 0.7, 0.28]} rotation={[0, -0.3, 0]}>
         <Box position={[0, 0.11, 0]} size={[0.5, 0.22, 0.34]} colour={C.woodDark} />
         {[-0.09, -0.03, 0.03, 0.09].map((z) => (
           <Box key={z} position={[0, 0.24, z]} size={[0.42, 0.06, 0.02]} colour={C.paper} rotation={[0.12, 0, 0]} />
         ))}
       </group>
+      {/* A spilled fan of punch cards */}
+      {[0, 1, 2, 3, 4].map((i) => (
+        <Box
+          key={i}
+          position={[0.5 - i * 0.05, 0.71 + i * 0.004, 0.02 + i * 0.03]}
+          size={[0.19, 0.003, 0.08]}
+          colour={i % 2 ? C.paperAged : C.paper}
+          rotation={[0, 0.3 + i * 0.14, 0]}
+        />
+      ))}
     </group>
   );
 }
@@ -517,16 +978,38 @@ function Doorway() {
         <sphereGeometry args={[0.07, 12, 12]} />
         <meshStandardMaterial color={C.brass} metalness={0.7} roughness={0.3} />
       </mesh>
+      {/* Escutcheon, hinges and a letter slot */}
+      <Box position={[0.48, 0.88, 0.07]} size={[0.07, 0.12, 0.02]} colour={C.brass} metalness={0.7} roughness={0.35} />
+      {[0.45, 1.15, 1.95].map((y) => (
+        <Box key={y} position={[-0.63, y, 0.06]} size={[0.06, 0.16, 0.03]} colour={C.brass} metalness={0.7} roughness={0.4} />
+      ))}
+      <Box position={[0, 1.24, 0.07]} size={[0.5, 0.06, 0.02]} colour={C.brass} metalness={0.65} roughness={0.4} />
       {/* Light under the door — somewhere else exists, which makes this a room and not a box */}
       <mesh position={[0, 0.03, 0.12]}>
         <planeGeometry args={[1.2, 0.06]} />
         <meshBasicMaterial color="#ffd9a0" />
       </mesh>
+      {/* Key hooks beside the frame */}
+      <group position={[1.15, 1.5, 0.04]}>
+        <Box position={[0, 0, 0]} size={[0.3, 0.22, 0.03]} colour={C.woodDark} />
+        {[-0.09, 0, 0.09].map((x) => (
+          <mesh key={x} position={[x, -0.04, 0.03]} rotation={[Math.PI / 2, 0, 0]}>
+            <cylinderGeometry args={[0.006, 0.006, 0.05, 6]} />
+            <meshStandardMaterial color={C.brass} metalness={0.7} roughness={0.35} />
+          </mesh>
+        ))}
+        <Box position={[-0.09, -0.11, 0.04]} size={[0.03, 0.09, 0.008]} colour={C.brass} metalness={0.7} roughness={0.4} />
+      </group>
+      {/* Light switch */}
+      <group position={[1.15, 1.15, 0.03]}>
+        <Box position={[0, 0, 0]} size={[0.11, 0.13, 0.02]} colour="#d8d2c4" />
+        <Box position={[0, 0.01, 0.02]} size={[0.04, 0.05, 0.015]} colour="#b8b2a4" />
+      </group>
     </group>
   );
 }
 
-/** Tall window on the left wall with night outside — the room's second light source. */
+/** Tall window on the left wall with night outside, curtains and a sill. */
 function Window() {
   return (
     <group position={[-ROOM.halfWidth + 0.09, 2.3, 1.6]} rotation={[0, Math.PI / 2, 0]}>
@@ -536,6 +1019,13 @@ function Window() {
         <planeGeometry args={[2.0, 2.4]} />
         <meshStandardMaterial color={C.glass} emissive="#2c4a6b" emissiveIntensity={0.55} roughness={0.25} />
       </mesh>
+      {/* Rain streaks on the outside */}
+      {Array.from({ length: 14 }, (_, i) => (
+        <mesh key={i} position={[-0.9 + i * 0.14, ((i * 37) % 9) * 0.2 - 0.8, 0.005]} rotation={[0, 0, 0.06]}>
+          <planeGeometry args={[0.012, 0.3 + ((i * 53) % 5) * 0.12]} />
+          <meshBasicMaterial color="#b6cfe0" transparent opacity={0.2} />
+        </mesh>
+      ))}
       {/* Frame and glazing bars */}
       <Box position={[0, 1.34, 0.03]} size={[2.36, 0.16, 0.14]} colour={C.woodPale} />
       <Box position={[0, -1.34, 0.03]} size={[2.36, 0.16, 0.18]} colour={C.woodPale} />
@@ -543,6 +1033,228 @@ function Window() {
       <Box position={[1.1, 0, 0.03]} size={[0.16, 2.84, 0.14]} colour={C.woodPale} />
       <Box position={[0, 0, 0.04]} size={[0.08, 2.4, 0.06]} colour={C.woodPale} />
       <Box position={[0, 0, 0.04]} size={[2.0, 0.08, 0.06]} colour={C.woodPale} />
+      {/* Sill, with a jar and a stone on it */}
+      <Box position={[0, -1.44, 0.12]} size={[2.5, 0.08, 0.3]} colour={C.woodPale} />
+      <mesh position={[-0.75, -1.28, 0.14]} castShadow>
+        <cylinderGeometry args={[0.07, 0.07, 0.22, 12]} />
+        <meshStandardMaterial color={C.jar} transparent opacity={0.55} roughness={0.15} />
+      </mesh>
+      <mesh position={[0.8, -1.34, 0.14]} castShadow>
+        <dodecahedronGeometry args={[0.09, 0]} />
+        <meshStandardMaterial color="#6b6e75" roughness={0.95} />
+      </mesh>
+      {/* Curtains, drawn back to either side */}
+      {[-1.42, 1.42].map((x) => (
+        <group key={x} position={[x, 0.06, 0.16]}>
+          {[-0.13, 0, 0.13].map((o) => (
+            <mesh key={o} position={[o * 0.6, 0, o * 0.5]} castShadow>
+              <cylinderGeometry args={[0.09, 0.12, 2.6, 8]} />
+              <meshStandardMaterial color={C.cloth} roughness={1} />
+            </mesh>
+          ))}
+        </group>
+      ))}
+      {/* Curtain pole */}
+      <mesh position={[0, 1.52, 0.16]} rotation={[0, 0, Math.PI / 2]}>
+        <cylinderGeometry args={[0.03, 0.03, 3.0, 10]} />
+        <meshStandardMaterial color={C.woodDark} roughness={0.7} />
+      </mesh>
+      {[-1.5, 1.5].map((x) => (
+        <mesh key={x} position={[x, 1.52, 0.16]} rotation={[0, 0, Math.PI / 2]}>
+          <sphereGeometry args={[0.055, 10, 10]} />
+          <meshStandardMaterial color={C.brass} metalness={0.7} roughness={0.35} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+/**
+ * A pot-bellied stove with its flue.
+ *
+ * It earns its place twice over: it fills the back-right corner, which was
+ * bare floor, and its firebox is the room's one warm light at floor level —
+ * which matters more now the ceiling lamps have been taken down a notch.
+ */
+function Stove() {
+  return (
+    <group position={[-2.2, 0, -5.45]} rotation={[0, 0.25, 0]}>
+      {/* Legs */}
+      {[0.6, 2.0, 3.5, 4.9].map((a) => (
+        <mesh key={a} position={[Math.cos(a) * 0.3, 0.11, Math.sin(a) * 0.3]} rotation={[0.12, 0, 0.12]}>
+          <cylinderGeometry args={[0.03, 0.045, 0.22, 8]} />
+          <meshStandardMaterial color={C.ink} roughness={0.7} metalness={0.3} />
+        </mesh>
+      ))}
+      {/* Belly */}
+      <mesh position={[0, 0.55, 0]} castShadow>
+        <sphereGeometry args={[0.42, 18, 14]} />
+        <meshStandardMaterial color={C.enamel} roughness={0.6} metalness={0.35} />
+      </mesh>
+      <mesh position={[0, 0.9, 0]} castShadow>
+        <cylinderGeometry args={[0.26, 0.36, 0.3, 18]} />
+        <meshStandardMaterial color={C.enamel} roughness={0.6} metalness={0.35} />
+      </mesh>
+      <mesh position={[0, 1.07, 0]}>
+        <cylinderGeometry args={[0.3, 0.3, 0.05, 18]} />
+        <meshStandardMaterial color={C.ink} roughness={0.55} metalness={0.4} />
+      </mesh>
+      {/* Firebox door, ajar, with the fire behind it */}
+      <mesh position={[0, 0.5, 0.4]} rotation={[0, 0.5, 0]}>
+        <circleGeometry args={[0.17, 16]} />
+        <meshStandardMaterial color={C.rust} roughness={0.8} metalness={0.25} side={2} />
+      </mesh>
+      <mesh position={[0, 0.5, 0.415]}>
+        <circleGeometry args={[0.14, 16]} />
+        <meshBasicMaterial color="#ff7a2f" />
+      </mesh>
+      {[0.06, -0.05].map((y) => (
+        <mesh key={y} position={[y * 1.4, 0.5 + y, 0.42]}>
+          <planeGeometry args={[0.2, 0.02]} />
+          <meshBasicMaterial color={C.ink} />
+        </mesh>
+      ))}
+      <pointLight position={[0, 0.5, 0.55]} intensity={5} distance={4.5} decay={2} color="#ff9440" />
+      {/* Flue, up and into the ceiling */}
+      <mesh position={[0, 2.05, 0]} castShadow>
+        <cylinderGeometry args={[0.11, 0.11, 1.9, 12]} />
+        <meshStandardMaterial color={C.ink} roughness={0.7} metalness={0.35} />
+      </mesh>
+      {[1.3, 2.4].map((y) => (
+        <mesh key={y} position={[0, y, 0]}>
+          <cylinderGeometry args={[0.125, 0.125, 0.06, 12]} />
+          <meshStandardMaterial color={C.metalDark} roughness={0.6} metalness={0.45} />
+        </mesh>
+      ))}
+      {/* Carries on into the ceiling — a flue that stops in mid-air says the
+          room has no outside. */}
+      <mesh position={[0, 4.05, 0]} castShadow>
+        <cylinderGeometry args={[0.11, 0.11, 2.1, 12]} />
+        <meshStandardMaterial color={C.ink} roughness={0.7} metalness={0.35} />
+      </mesh>
+      {/* Coal scuttle beside it */}
+      <group position={[0.62, 0, 0.15]} rotation={[0, 0.7, 0]}>
+        <mesh position={[0, 0.16, 0]} castShadow>
+          <cylinderGeometry args={[0.2, 0.14, 0.32, 12]} />
+          <meshStandardMaterial color={C.metalDark} metalness={0.5} roughness={0.55} />
+        </mesh>
+        {[
+          [0.05, 0.03],
+          [-0.04, 0.06],
+          [0.02, -0.06],
+        ].map(([x, z]) => (
+          <mesh key={`${x}:${z}`} position={[x, 0.33, z]}>
+            <dodecahedronGeometry args={[0.05, 0]} />
+            <meshStandardMaterial color="#1a1a1e" roughness={0.95} />
+          </mesh>
+        ))}
+      </group>
+    </group>
+  );
+}
+
+/** A banded steamer trunk against the front wall. */
+function Trunk() {
+  return (
+    <group position={[2.9, 0, 3.5]} rotation={[0, 0.16, 0]}>
+      <Box position={[0, 0.26, 0]} size={[1.3, 0.52, 0.72]} colour="#5c4230" />
+      {/* Domed lid */}
+      <mesh position={[0, 0.52, 0]} rotation={[0, 0, Math.PI / 2]} castShadow>
+        <cylinderGeometry args={[0.36, 0.36, 1.3, 16, 1, false, 0, Math.PI]} />
+        <meshStandardMaterial color="#5c4230" roughness={0.85} />
+      </mesh>
+      {/* Straps and corner caps */}
+      {[-0.42, 0.42].map((x) => (
+        <group key={x}>
+          <Box position={[x, 0.26, 0]} size={[0.09, 0.54, 0.74]} colour={C.woodDark} />
+          <Box position={[x, 0.53, 0]} size={[0.09, 0.36, 0.76]} colour={C.woodDark} />
+        </group>
+      ))}
+      <Box position={[0, 0.51, 0]} size={[1.32, 0.05, 0.74]} colour={C.metalDark} metalness={0.5} roughness={0.5} />
+      {/* Latches and a leather handle */}
+      {[-0.28, 0.28].map((x) => (
+        <Box key={x} position={[x, 0.46, 0.37]} size={[0.1, 0.12, 0.03]} colour={C.brass} metalness={0.7} roughness={0.35} />
+      ))}
+      <mesh position={[0.68, 0.3, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <torusGeometry args={[0.09, 0.018, 6, 14, Math.PI]} />
+        <meshStandardMaterial color="#4a3524" roughness={0.9} />
+      </mesh>
+      {/* Shipping labels */}
+      {[
+        [-0.18, 0.3, 0.1],
+        [0.14, 0.18, -0.24],
+      ].map(([x, y, r]) => (
+        <mesh key={x} position={[x, y, 0.362]} rotation={[0, 0, r]}>
+          <planeGeometry args={[0.22, 0.16]} />
+          <meshStandardMaterial color={C.paperAged} roughness={1} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+/** A sack barrow parked against the front wall. */
+function SackBarrow() {
+  return (
+    <group position={[1.2, 0, 3.85]} rotation={[0, 0.25, 0]}>
+      {/* Frame, leaning back against the wall */}
+      <group rotation={[0.16, 0, 0]}>
+        {[-0.22, 0.22].map((x) => (
+          <mesh key={x} position={[x, 0.62, 0]} castShadow>
+            <boxGeometry args={[0.05, 1.24, 0.05]} />
+            <meshStandardMaterial color={C.metalDark} metalness={0.5} roughness={0.5} />
+          </mesh>
+        ))}
+        {[0.3, 0.75, 1.18].map((y) => (
+          <Box key={y} position={[0, y, 0]} size={[0.44, 0.04, 0.04]} colour={C.metalDark} metalness={0.5} />
+        ))}
+        {/* Toe plate */}
+        <Box position={[0, 0.06, 0.14]} size={[0.46, 0.03, 0.26]} colour={C.metal} metalness={0.5} roughness={0.5} />
+      </group>
+      {/* Wheels */}
+      {[-0.27, 0.27].map((x) => (
+        <mesh key={x} position={[x, 0.14, -0.06]} rotation={[0, 0, Math.PI / 2]} castShadow>
+          <cylinderGeometry args={[0.14, 0.14, 0.06, 14]} />
+          <meshStandardMaterial color="#25282e" roughness={0.9} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+/** A bracket shelf of preserving jars, high on the back wall. */
+function JarShelf() {
+  return (
+    <group position={[-1.4, 2.35, ROOM.backZ + 0.18]}>
+      <Box position={[0, 0, 0]} size={[1.7, 0.06, 0.28]} colour={C.wood} />
+      {[-0.7, 0.7].map((x) => (
+        <mesh key={x} position={[x, -0.12, -0.02]} rotation={[0, 0, Math.PI / 4]}>
+          <boxGeometry args={[0.04, 0.24, 0.04]} />
+          <meshStandardMaterial color={C.metalDark} metalness={0.4} roughness={0.6} />
+        </mesh>
+      ))}
+      {[
+        { x: -0.6, r: 0.08, h: 0.24, fill: "#7a6a4a" },
+        { x: -0.3, r: 0.07, h: 0.18, fill: "#5b6f52" },
+        { x: 0.02, r: 0.09, h: 0.26, fill: "#6b5340" },
+        { x: 0.34, r: 0.065, h: 0.16, fill: "#4d5f6b" },
+        { x: 0.62, r: 0.08, h: 0.22, fill: "#6a5a6b" },
+      ].map((j) => (
+        <group key={j.x} position={[j.x, 0.03 + j.h / 2, 0]}>
+          <mesh castShadow>
+            <cylinderGeometry args={[j.r, j.r, j.h, 12]} />
+            <meshStandardMaterial color={C.jar} transparent opacity={0.42} roughness={0.12} />
+          </mesh>
+          <mesh position={[0, -j.h * 0.22, 0]}>
+            <cylinderGeometry args={[j.r * 0.88, j.r * 0.88, j.h * 0.5, 12]} />
+            <meshStandardMaterial color={j.fill} roughness={0.9} />
+          </mesh>
+          <mesh position={[0, j.h / 2 + 0.012, 0]}>
+            <cylinderGeometry args={[j.r * 0.9, j.r * 0.9, 0.03, 12]} />
+            <meshStandardMaterial color={C.brass} metalness={0.5} roughness={0.5} />
+          </mesh>
+        </group>
+      ))}
     </group>
   );
 }
@@ -551,7 +1263,7 @@ function Window() {
 function Clutter() {
   return (
     <group>
-      {/* Radiator on the right wall */}
+      {/* Radiator on the right wall, with its valve and pipe */}
       <group position={[ROOM.halfWidth - 0.22, 0.5, 2.3]}>
         {Array.from({ length: 9 }, (_, i) => (
           <mesh key={i} position={[0, 0, -0.6 + i * 0.15]} castShadow>
@@ -560,6 +1272,15 @@ function Clutter() {
           </mesh>
         ))}
         <Box position={[0, 0.44, 0]} size={[0.16, 0.06, 1.4]} colour={C.metal} metalness={0.5} />
+        <Box position={[0, -0.44, 0]} size={[0.16, 0.06, 1.4]} colour={C.metal} metalness={0.5} />
+        <mesh position={[0.02, -0.3, -0.7]} rotation={[0, 0, 0]}>
+          <cylinderGeometry args={[0.03, 0.03, 0.4, 8]} />
+          <meshStandardMaterial color={C.brass} metalness={0.6} roughness={0.45} />
+        </mesh>
+        <mesh position={[0.02, -0.06, -0.7]}>
+          <sphereGeometry args={[0.05, 10, 10]} />
+          <meshStandardMaterial color={C.brass} metalness={0.7} roughness={0.35} />
+        </mesh>
       </group>
 
       {/* Potted plant */}
@@ -568,27 +1289,32 @@ function Clutter() {
           <cylinderGeometry args={[0.3, 0.22, 0.52, 16]} />
           <meshStandardMaterial color="#8a5a44" roughness={0.9} />
         </mesh>
+        <mesh position={[0, 0.5, 0]}>
+          <cylinderGeometry args={[0.33, 0.33, 0.07, 16]} />
+          <meshStandardMaterial color="#7d4f3c" roughness={0.9} />
+        </mesh>
         <mesh position={[0, 0.53, 0]}>
           <cylinderGeometry args={[0.27, 0.27, 0.05, 16]} />
           <meshStandardMaterial color="#2f2a22" roughness={1} />
         </mesh>
-        {Array.from({ length: 7 }, (_, i) => {
-          const a = (i / 7) * Math.PI * 2;
+        {Array.from({ length: 9 }, (_, i) => {
+          const a = (i / 9) * Math.PI * 2;
+          const lean = 0.4 + (i % 3) * 0.18;
           return (
             <mesh
               key={i}
-              position={[Math.cos(a) * 0.16, 0.95, Math.sin(a) * 0.16]}
-              rotation={[Math.cos(a) * 0.5, a, Math.sin(a) * 0.5]}
+              position={[Math.cos(a) * 0.16, 0.9 + (i % 3) * 0.1, Math.sin(a) * 0.16]}
+              rotation={[Math.cos(a) * lean, a, Math.sin(a) * lean]}
               castShadow
             >
-              <coneGeometry args={[0.12, 0.85, 5]} />
-              <meshStandardMaterial color={C.green} roughness={0.8} />
+              <coneGeometry args={[0.11, 0.8 + (i % 2) * 0.2, 5]} />
+              <meshStandardMaterial color={i % 3 === 0 ? "#4e7d5c" : C.green} roughness={0.8} />
             </mesh>
           );
         })}
       </group>
 
-      {/* Coat stand */}
+      {/* Coat stand, with a coat, a hat and an umbrella */}
       <group position={[-5.1, 0, 2.8]}>
         <mesh position={[0, 0.9, 0]} castShadow>
           <cylinderGeometry args={[0.05, 0.05, 1.8, 10]} />
@@ -604,12 +1330,39 @@ function Clutter() {
             <meshStandardMaterial color={C.woodDark} />
           </mesh>
         ))}
-        {/* A coat hanging on it */}
+        {/* A coat hanging on it, with shoulders and a collar */}
         <Box position={[0.14, 1.15, 0.1]} size={[0.4, 1.0, 0.22]} colour="#3f4a5c" roughness={1} />
+        <mesh position={[0.14, 1.62, 0.1]} rotation={[0, 0, 0]}>
+          <cylinderGeometry args={[0.06, 0.21, 0.16, 10]} />
+          <meshStandardMaterial color="#3f4a5c" roughness={1} />
+        </mesh>
+        <Box position={[0.14, 1.68, 0.1]} size={[0.2, 0.06, 0.2]} colour="#333d4c" roughness={1} />
+        {/* Hat on the top hook */}
+        <group position={[-0.15, 1.78, -0.02]} rotation={[0.2, 0, 0.15]}>
+          <mesh castShadow>
+            <cylinderGeometry args={[0.13, 0.14, 0.03, 14]} />
+            <meshStandardMaterial color="#43382f" roughness={0.95} />
+          </mesh>
+          <mesh position={[0, 0.06, 0]}>
+            <cylinderGeometry args={[0.085, 0.09, 0.11, 14]} />
+            <meshStandardMaterial color="#43382f" roughness={0.95} />
+          </mesh>
+        </group>
+        {/* Umbrella leaning in the base */}
+        <group position={[0.2, 0, 0.18]} rotation={[0.14, 0, -0.1]}>
+          <mesh position={[0, 0.44, 0]} castShadow>
+            <cylinderGeometry args={[0.035, 0.02, 0.88, 8]} />
+            <meshStandardMaterial color="#2f3a4a" roughness={0.9} />
+          </mesh>
+          <mesh position={[0, 0.94, 0]} rotation={[0, 0, Math.PI / 2]}>
+            <torusGeometry args={[0.05, 0.012, 6, 12, Math.PI]} />
+            <meshStandardMaterial color={C.woodDark} roughness={0.8} />
+          </mesh>
+        </group>
       </group>
 
-      {/* Step ladder against the back-right */}
-      <group position={[4.0, 0, -4.7]} rotation={[0, -0.5, 0]}>
+      {/* Step ladder folded into the back-right corner */}
+      <group position={[4.7, 0, -5.3]} rotation={[0, 2.5, 0]}>
         {[-0.28, 0.28].map((x) => (
           <mesh key={x} position={[x, 0.9, 0]} rotation={[0.12, 0, 0]} castShadow>
             <boxGeometry args={[0.08, 1.8, 0.08]} />
@@ -619,26 +1372,111 @@ function Clutter() {
         {[0.3, 0.7, 1.1, 1.5].map((y) => (
           <Box key={y} position={[0, y, y * 0.12 - 0.11]} size={[0.62, 0.05, 0.2]} colour={C.wood} />
         ))}
+        {/* Back legs and the spreader between them */}
+        {[-0.24, 0.24].map((x) => (
+          <mesh key={`b${x}`} position={[x, 0.86, -0.3]} rotation={[-0.2, 0, 0]} castShadow>
+            <boxGeometry args={[0.06, 1.76, 0.06]} />
+            <meshStandardMaterial color={C.woodPale} roughness={0.85} />
+          </mesh>
+        ))}
+        <mesh position={[0.28, 0.9, -0.16]} rotation={[0, 0, 0.5]}>
+          <cylinderGeometry args={[0.01, 0.01, 0.36, 6]} />
+          <meshStandardMaterial color={C.metal} metalness={0.6} roughness={0.5} />
+        </mesh>
+        {/* Paint tin on the top step */}
+        <mesh position={[0, 1.6, -0.1]} castShadow>
+          <cylinderGeometry args={[0.09, 0.09, 0.14, 12]} />
+          <meshStandardMaterial color={C.metal} metalness={0.5} roughness={0.5} />
+        </mesh>
       </group>
 
       {/* Wastebasket and dropped newspapers near the desk */}
-      <mesh position={[-3.9, 0.2, -2.0]} castShadow>
-        <cylinderGeometry args={[0.22, 0.17, 0.4, 12]} />
-        <meshStandardMaterial color={C.metalDark} metalness={0.4} roughness={0.6} />
-      </mesh>
+      <group position={[-3.9, 0, -2.0]}>
+        <mesh position={[0, 0.2, 0]} castShadow>
+          <cylinderGeometry args={[0.22, 0.17, 0.4, 12, 1, true]} />
+          <meshStandardMaterial color={C.metalDark} metalness={0.4} roughness={0.6} side={2} />
+        </mesh>
+        <mesh position={[0, 0.01, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <circleGeometry args={[0.17, 12]} />
+          <meshStandardMaterial color={C.ink} roughness={0.9} />
+        </mesh>
+        {[
+          [0.06, 0.04],
+          [-0.05, -0.03],
+          [0.0, 0.09],
+        ].map(([x, z]) => (
+          <mesh key={`${x}:${z}`} position={[x, 0.36, z]} castShadow>
+            <dodecahedronGeometry args={[0.07, 0]} />
+            <meshStandardMaterial color={C.paperAged} roughness={1} />
+          </mesh>
+        ))}
+      </group>
       <Box position={[-3.55, 0.03, -1.35]} size={[0.5, 0.05, 0.36]} colour={C.paperAged} rotation={[0, 0.5, 0]} />
       <Box position={[-3.45, 0.08, -1.3]} size={[0.46, 0.04, 0.34]} colour={C.paper} rotation={[0, 0.2, 0]} />
+      <mesh position={[-3.45, 0.11, -1.3]} rotation={[-Math.PI / 2, 0, 0.2]}>
+        <planeGeometry args={[0.3, 0.06]} />
+        <meshStandardMaterial color="#8f8878" roughness={1} />
+      </mesh>
     </group>
   );
 }
 
-/** Ceiling lamps, pipes, wall clock, framed notices. */
+/** The ceiling fan, turning slowly. */
+function CeilingFan() {
+  const blades = useRef<Group>(null);
+  useFrame((_state, delta) => {
+    if (blades.current) blades.current.rotation.y += delta * 0.55;
+  });
+
+  return (
+    <group position={[0, 0, 1.0]}>
+      <mesh position={[0, 4.78, 0]}>
+        <cylinderGeometry args={[0.03, 0.03, 0.44, 8]} />
+        <meshStandardMaterial color={C.metalDark} metalness={0.5} roughness={0.5} />
+      </mesh>
+      <mesh position={[0, 4.54, 0]} castShadow>
+        <cylinderGeometry args={[0.13, 0.16, 0.14, 14]} />
+        <meshStandardMaterial color={C.woodDark} roughness={0.6} metalness={0.2} />
+      </mesh>
+      <group ref={blades} position={[0, 4.46, 0]}>
+        {[0, 1, 2, 3].map((i) => {
+          const a = (i / 4) * Math.PI * 2;
+          return (
+            <group key={i} rotation={[0, a, 0]}>
+              <Box position={[0.16, 0, 0]} size={[0.16, 0.02, 0.06]} colour={C.metalDark} metalness={0.5} />
+              <Box position={[0.62, -0.01, 0]} size={[0.78, 0.02, 0.24]} colour="#7a6248" rotation={[0.1, 0, 0]} />
+            </group>
+          );
+        })}
+      </group>
+      {/* Pull cord */}
+      <mesh position={[0, 4.3, 0]}>
+        <cylinderGeometry args={[0.004, 0.004, 0.32, 5]} />
+        <meshStandardMaterial color="#b8ad96" roughness={0.9} />
+      </mesh>
+    </group>
+  );
+}
+
+/**
+ * Ceiling lamps, pipes, fuse box, framed notices.
+ *
+ * The wall clock used to live here. It is now interactive — it swings aside to
+ * show what is behind it — so it moved to MysteryRoomTools.tsx, which is the
+ * only file allowed to hold things with an onClick. Nothing in this file
+ * responds to a pointer, which is what makes "clicking a filing cabinet does
+ * nothing" a property of the code rather than a thing to remember.
+ */
 function Fittings() {
   return (
     <group>
       {/* Three pendant lamps down the room */}
       {[-3.2, -0.4, 2.4].map((z) => (
         <group key={z} position={[0, 0, z]}>
+          <mesh position={[0, 4.86, 0]}>
+            <cylinderGeometry args={[0.08, 0.08, 0.06, 10]} />
+            <meshStandardMaterial color={C.metalDark} metalness={0.5} roughness={0.5} />
+          </mesh>
           <mesh position={[0, 4.72, 0]}>
             <cylinderGeometry args={[0.03, 0.03, 0.56, 6]} />
             <meshStandardMaterial color={C.metalDark} />
@@ -647,41 +1485,64 @@ function Fittings() {
             <coneGeometry args={[0.55, 0.42, 20, 1, true]} />
             <meshStandardMaterial color="#2c3540" roughness={0.5} metalness={0.4} side={2} />
           </mesh>
+          {/* Enamel underside — a shade lit from inside is a different colour to its outside */}
+          <mesh position={[0, 4.145, 0]} rotation={[Math.PI / 2, 0, 0]}>
+            <ringGeometry args={[0.16, 0.55, 20]} />
+            <meshStandardMaterial color="#d9cdb4" roughness={0.6} side={2} />
+          </mesh>
           <mesh position={[0, 4.2, 0]}>
             <sphereGeometry args={[0.14, 12, 12]} />
             <meshBasicMaterial color="#fff0d4" />
           </mesh>
-          <pointLight position={[0, 4.0, 0]} intensity={26} distance={11} decay={2} color="#ffe0b8" />
+          <pointLight position={[0, 4.0, 0]} intensity={20} distance={11} decay={2} color="#ffe0b8" />
         </group>
       ))}
 
-      {/* Pipes across the ceiling */}
+      {/* Pipes across the ceiling, with brackets */}
       {[-3.6, 3.4].map((x) => (
-        <mesh key={x} position={[x, 4.78, -1]} rotation={[Math.PI / 2, 0, 0]}>
-          <cylinderGeometry args={[0.11, 0.11, 9.5, 10]} />
-          <meshStandardMaterial color={C.metal} roughness={0.5} metalness={0.55} />
-        </mesh>
+        <group key={x}>
+          <mesh position={[x, 4.78, -1]} rotation={[Math.PI / 2, 0, 0]}>
+            <cylinderGeometry args={[0.11, 0.11, 9.5, 10]} />
+            <meshStandardMaterial color={C.metal} roughness={0.5} metalness={0.55} />
+          </mesh>
+          {[-4.6, -2.2, 0.4, 2.8].map((z) => (
+            <mesh key={z} position={[x, 4.9, z]}>
+              <boxGeometry args={[0.05, 0.2, 0.05]} />
+              <meshStandardMaterial color={C.metalDark} metalness={0.5} roughness={0.5} />
+            </mesh>
+          ))}
+          {/* A flanged joint partway along */}
+          <mesh position={[x, 4.78, -1.6]} rotation={[Math.PI / 2, 0, 0]}>
+            <cylinderGeometry args={[0.14, 0.14, 0.1, 10]} />
+            <meshStandardMaterial color={C.rust} roughness={0.8} metalness={0.3} />
+          </mesh>
+        </group>
       ))}
 
-      {/* Wall clock */}
-      <group position={[2.0, 3.6, ROOM.backZ + 0.09]}>
-        <mesh rotation={[Math.PI / 2, 0, 0]}>
-          <cylinderGeometry args={[0.34, 0.34, 0.08, 24]} />
-          <meshStandardMaterial color={C.metalDark} roughness={0.6} />
+      {/* Fuse box on the back wall */}
+      <group position={[-0.2, 2.3, ROOM.backZ + 0.12]}>
+        <Box position={[0, 0, 0]} size={[0.5, 0.62, 0.16]} colour="#3a4450" roughness={0.6} metalness={0.3} />
+        <Box position={[-0.16, 0, 0.09]} size={[0.16, 0.58, 0.02]} colour="#2e3742" />
+        {[0.18, 0.06, -0.06, -0.18].map((y) => (
+          <group key={y}>
+            <Box position={[0.09, y, 0.09]} size={[0.22, 0.06, 0.03]} colour="#c4bca8" />
+            <Box position={[0.16, y + 0.01, 0.11]} size={[0.05, 0.04, 0.02]} colour="#8b2b2b" />
+          </group>
+        ))}
+        {/* Conduit running up to the ceiling */}
+        <mesh position={[0, 1.32, 0]}>
+          <cylinderGeometry args={[0.03, 0.03, 2.0, 8]} />
+          <meshStandardMaterial color={C.metal} metalness={0.5} roughness={0.55} />
         </mesh>
-        <mesh position={[0, 0, 0.05]} rotation={[Math.PI / 2, 0, 0]}>
-          <cylinderGeometry args={[0.28, 0.28, 0.02, 24]} />
-          <meshStandardMaterial color={C.paper} roughness={0.9} />
-        </mesh>
-        <Box position={[0, 0.08, 0.07]} size={[0.03, 0.18, 0.01]} colour="#20242a" />
-        <Box position={[0.09, 0, 0.07]} size={[0.16, 0.03, 0.01]} colour="#20242a" />
       </group>
 
       {/* Framed notices on the back wall */}
       {[
-        { x: -1.9, y: 3.2, w: 0.9, h: 1.1, tilt: 0 },
-        { x: -0.7, y: 3.0, w: 0.7, h: 0.6, tilt: 0.09 },
+        // Clear of the stove flue, which now rises past x = -2.2.
+        { x: -3.4, y: 3.2, w: 0.9, h: 1.1, tilt: 0 },
+        { x: -0.7, y: 3.05, w: 0.7, h: 0.6, tilt: 0.09 },
         { x: 3.6, y: 2.6, w: 0.8, h: 1.0, tilt: -0.05 },
+        { x: 4.7, y: 3.3, w: 0.6, h: 0.8, tilt: 0.06 },
       ].map((f) => (
         <group key={`${f.x}-${f.y}`} position={[f.x, f.y, ROOM.backZ + 0.07]} rotation={[0, 0, f.tilt]}>
           <Box position={[0, 0, 0]} size={[f.w, f.h, 0.05]} colour={C.woodDark} />
@@ -689,6 +1550,13 @@ function Fittings() {
             <planeGeometry args={[f.w - 0.12, f.h - 0.12]} />
             <meshStandardMaterial color={C.paperAged} roughness={0.95} />
           </mesh>
+          {/* Lines of unreadable text, so a frame is not an empty rectangle */}
+          {Array.from({ length: 5 }, (_, i) => (
+            <mesh key={i} position={[0, f.h / 2 - 0.24 - i * 0.12, 0.035]}>
+              <planeGeometry args={[(f.w - 0.24) * (i % 2 ? 0.7 : 1), 0.02]} />
+              <meshBasicMaterial color="#9c9484" />
+            </mesh>
+          ))}
         </group>
       ))}
     </group>
@@ -698,11 +1566,12 @@ function Fittings() {
 /**
  * Lighting.
  *
- * Deliberately bright now: the room is searched on foot, and a player who
- * cannot see into a corner cannot tell "nothing here" from "too dark to
- * tell". The torch is a puzzle instrument, not the only way to see — it is
- * what carries the blue filter to the board, and the room reads fine without
- * it.
+ * Taken down a notch from where it was: bright enough to search a corner and
+ * tell "nothing here" from "too dark to tell", dim enough that the torch beam
+ * reads as a beam and the stove and the desk lamp count for something. The
+ * torch is still a puzzle instrument rather than the only way to see — the
+ * room is navigable without it, and always has to be, because a player who
+ * has not found it yet still has to be able to look for it.
  *
  * Only the ceiling spot casts shadows. Every additional shadow-casting light
  * is a full depth pass per frame, and this runs on whatever laptop is wired
@@ -711,24 +1580,24 @@ function Fittings() {
 function Lighting() {
   return (
     <group>
-      <ambientLight intensity={0.75} />
+      <ambientLight intensity={0.52} />
       {/* three.js parses #RRGGBB only — an 8-digit hex with alpha is silently
           ignored and warns, so ground colour stays a plain six. */}
-      <hemisphereLight args={["#cddcf0", "#544740", 0.9]} />
+      <hemisphereLight args={["#cddcf0", "#544740", 0.62]} />
       <spotLight
         position={[0, 4.7, -1.0]}
         angle={1.0}
         penumbra={0.7}
-        intensity={90}
+        intensity={72}
         distance={16}
         color="#fff1dc"
         castShadow
         shadow-mapSize={[1024, 1024]}
       />
       {/* Cool bounce from the window end */}
-      <pointLight position={[-4.4, 2.4, 1.6]} intensity={16} distance={9} color="#8fb4e0" />
+      <pointLight position={[-4.4, 2.4, 1.6]} intensity={12} distance={9} color="#8fb4e0" />
       {/* Fill so the front wall is not a black slab when the player turns round */}
-      <pointLight position={[0, 2.6, 3.6]} intensity={12} distance={9} color="#ffe8cc" />
+      <pointLight position={[0, 2.6, 3.6]} intensity={9} distance={9} color="#ffe8cc" />
     </group>
   );
 }
@@ -751,7 +1620,12 @@ export default function RoomScene(): ReactNode {
       <TerminalDesk />
       <Doorway />
       <Window />
+      <Stove />
+      <Trunk />
+      <SackBarrow />
+      <JarShelf />
       <Clutter />
+      <CeilingFan />
       <Fittings />
     </group>
   );

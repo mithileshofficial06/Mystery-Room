@@ -40,9 +40,19 @@ const script = opt("script", "none");
 /** Must match MysteryRoomPlayer.tsx. */
 const LOOK_SENSITIVITY = 0.0026;
 
-/** Must match MysteryRoomTools.tsx and manifest.ts. */
-const TORCH = [-2.35, 0.09, -2.35];
-const GEL = [-4.25, 1.2, -2.2];
+/**
+ * Must match the exported constants in MysteryRoomTools.tsx.
+ *
+ * Neither tool is reachable in one click any more: the torch is in a recess
+ * behind the wall clock and the gel is inside a hollowed-out book, so the
+ * route has to open the container first. That gating is the thing most worth
+ * testing here — "the container opened" and "the tool was taken" are separate
+ * facts, and the checks below assert they stay separate.
+ */
+const CLOCK = [2.0, 2.05, -5.79];
+const TORCH = [2.0, 2.02, -5.88];
+const BOOK = [-4.74, 1.68, -2.07];
+const GEL = [-4.76, 1.67, -2.07];
 /**
  * The secret paper. The board sits at [5.88, 1.72, -1.0] rotated -90 degrees
  * about Y, so its local +X maps to world +Z: a local offset of [0.42, -0.18]
@@ -76,20 +86,46 @@ await page.goto(url, { waitUntil: "domcontentloaded" });
 await page.waitForSelector("canvas");
 await page.waitForTimeout(4000);
 
-const box = await page.locator("canvas").boundingBox();
+/**
+ * Wait for a canvas that has actually been laid out.
+ *
+ * waitForSelector only proves the element is in the DOM. On the first load
+ * after an edit, Next is still compiling and the canvas is present at zero
+ * size, so boundingBox() returns null and the whole run dies on line one with
+ * "Cannot read properties of null" — which looks like a broken room and is
+ * really just a slow rebuild.
+ */
+let box = null;
+for (let i = 0; i < 30 && !(box && box.width > 0); i += 1) {
+  box = await page.locator("canvas").boundingBox();
+  if (!(box && box.width > 0)) await page.waitForTimeout(1000);
+}
+if (!box || box.width === 0) {
+  console.log("no canvas was ever laid out — is the dev server compiling, or did the room throw?");
+  console.log("=== CONSOLE (" + logs.length + ") ===");
+  for (const l of logs) console.log(l);
+  await browser.close();
+  process.exit(1);
+}
 const centre = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
 
 /** The player's real position and orientation, straight from the running app. */
 const state = () => page.evaluate(() => window.__room);
 
+/**
+ * Six interpolation steps, not twenty-four. The look handler integrates every
+ * pointermove, so the number of steps changes nothing about where the camera
+ * ends up — but each one is a round trip to the browser, and at four hundred
+ * drags a run that was most of the wall-clock time.
+ */
 async function drag(dx, dy) {
   const startX = centre.x - dx / 2;
   const startY = centre.y - dy / 2;
   await page.mouse.move(startX, startY);
   await page.mouse.down();
-  await page.mouse.move(startX + dx, startY + dy, { steps: 24 });
+  await page.mouse.move(startX + dx, startY + dy, { steps: 6 });
   await page.mouse.up();
-  await page.waitForTimeout(110);
+  await page.waitForTimeout(60);
 }
 
 /** Turn to an absolute yaw/pitch, splitting long turns so no drag leaves the canvas. */
@@ -122,23 +158,28 @@ const distanceTo = (from, to) => Math.hypot(to[0] - from.x, to[2] - from.z);
  * consecutive pushes make no progress (blocked by furniture, which is a
  * legitimate stop — the pickups are all reachable from outside a footprint).
  */
-async function walkTo(to, stopAt = 1.2, maxSteps = 70) {
+async function walkTo(to, stopAt = 1.2, maxSteps = 40) {
   let stalled = 0;
   for (let i = 0; i < maxSteps; i += 1) {
     const now = await state();
     const gap = distanceTo(now, to);
     if (gap <= stopAt) return now;
 
+    // Only re-aim when actually off course. Turning by a hundredth of a
+    // radian before every stride costs a drag and buys nothing.
     const [wantYaw] = aim(now, to);
-    await setView(wantYaw, 0);
+    let offBy = wantYaw - now.yaw;
+    while (offBy > Math.PI) offBy -= Math.PI * 2;
+    while (offBy < -Math.PI) offBy += Math.PI * 2;
+    if (Math.abs(offBy) > 0.1) await setView(wantYaw, 0);
 
     // Long enough per step to cover ground at SwiftShader's frame rate — a
     // 10-metre crossing at 26 short steps ran out of budget halfway and left
     // the route staring at the board from across the room.
     await page.keyboard.down("w");
-    await page.waitForTimeout(420);
+    await page.waitForTimeout(650);
     await page.keyboard.up("w");
-    await page.waitForTimeout(110);
+    await page.waitForTimeout(70);
 
     const after = await state();
     if (process.env.ROOM_TRACE) {
@@ -156,12 +197,12 @@ async function walkTo(to, stopAt = 1.2, maxSteps = 70) {
       // spent forty steps oscillating against a chair while reporting that
       // it was making progress. Six steps one way, then six the other, then
       // admit defeat.
-      const key = stalled <= 6 ? "d" : "a";
-      if (stalled > 12) return after;
+      const key = stalled <= 4 ? "d" : "a";
+      if (stalled > 8) return after;
       await page.keyboard.down(key);
-      await page.waitForTimeout(420);
+      await page.waitForTimeout(500);
       await page.keyboard.up(key);
-      await page.waitForTimeout(110);
+      await page.waitForTimeout(70);
     } else {
       stalled = 0;
     }
@@ -169,7 +210,80 @@ async function walkTo(to, stopAt = 1.2, maxSteps = 70) {
   return state();
 }
 
-const shot = (suffix) => page.screenshot({ path: out.replace(/\.png$/, `-${suffix}.png`) });
+/**
+ * Walk a list of floor waypoints, then a final target.
+ *
+ * Straight-line walking plus stall recovery gets around one desk. It does not
+ * get from the spawn point to the back wall past a bookcase, a terminal table
+ * and a step ladder — it wedges into the first corner it finds and the route
+ * silently verifies nothing. The waypoints are the corridors between
+ * footprints; they are chosen from OBSTACLES in MysteryRoomScene, not by eye.
+ */
+async function route(waypoints, target, stopAt) {
+  for (const point of waypoints) {
+    await walkTo([point[0], 0, point[1]], 0.5, 16);
+  }
+  return walkTo(target, stopAt, 24);
+}
+
+/**
+ * Aim at a point and click it, returning how far away the player was.
+ *
+ * The distance matters. A three.js raycast has no range, so a click lands on
+ * anything the crosshair covers however far off it is — this route once
+ * "opened" the book from four metres away, across the room, because it had
+ * wedged itself against a bookcase and the angle happened to be right. Every
+ * check passed and none of them meant anything: no player could have found a
+ * book at eye height from across a room. So the caller asserts on the range
+ * as well as the outcome.
+ */
+async function lookAndClick(target, settle = 900) {
+  const at = await state();
+  await setView(...aim(at, target));
+  await page.waitForTimeout(150);
+  await page.mouse.click(centre.x, centre.y);
+  await page.waitForTimeout(settle);
+  return distanceTo(at, target);
+}
+
+/** Arm's reach, near enough. Anything further is the route cheating. */
+const REACH = 2.0;
+
+/**
+ * The desk lamp, which blinks Morse continuously.
+ *
+ * Only the canvas is sampled, never the page: the HUD's transient note line
+ * changes on its own and would make any two full-page shots differ, so a
+ * frozen lamp would still "pass". Nothing else in shot ought to move — the
+ * ceiling fan is the room's other animated thing and is kept out of frame by
+ * looking down at the desk.
+ */
+const LAMP = [-3.1, 0.94, -3.14];
+
+async function lampBlinks(samples = 7, everyMs = 350) {
+  const frames = [];
+  for (let i = 0; i < samples; i += 1) {
+    frames.push(await page.locator("canvas").screenshot());
+    await page.waitForTimeout(everyMs);
+  }
+  return frames.some((f) => !f.equals(frames[0]));
+}
+
+/**
+ * A screenshot must never be able to fail the run.
+ *
+ * Playwright waits for web fonts before a page screenshot, and under a
+ * software GL renderer that wait has timed out and killed a run that had
+ * already passed thirteen checks. A missing picture is a nuisance; losing the
+ * checks because of one is not acceptable.
+ */
+async function shot(suffix) {
+  try {
+    await page.screenshot({ path: out.replace(/\.png$/, `-${suffix}.png`), timeout: 15000 });
+  } catch {
+    console.log(`  (screenshot "${suffix}" timed out — carrying on)`);
+  }
+}
 const tasksText = async () =>
   (await page.locator("text=/TASKS \\d+\\/\\d+/").first().textContent()).trim();
 const chips = async () => (await page.locator("text=/TORCH ·/").first().textContent()).trim()
@@ -184,28 +298,53 @@ function check(label, condition, detail) {
   }
 }
 
+/** Is the transient feedback line currently saying this? */
+const noteSays = (pattern) => page.locator(`text=${pattern}`).first().isVisible();
+
 if (script === "solve") {
-  console.log("\n-- Find and switch on the torch --");
-  let at = await walkTo(TORCH, 2.4);
-  await setView(...aim(at, TORCH));
-  await shot("1-torch-found");
-  await page.mouse.click(centre.x, centre.y);
-  await page.waitForTimeout(700);
-  check("the torch can be found and picked up", (await chips()).includes("TORCH · OFF"), await chips());
+  console.log("\n-- Open the wall clock and take the torch from behind it --");
+  // Down the right-hand side of the room, then west along the lane between
+  // the terminal table and the step ladder. These are the gaps between the
+  // inflated footprints in OBSTACLES, not a guess.
+  await route([[3.5, 1.5], [4.5, -0.5], [4.5, -2.5], [4.3, -4.0], [2.5, -4.2]], CLOCK, 1.0);
+  await shot("1-clock");
+  const clockRange = await lookAndClick(CLOCK, 1100);
+  check("the wall clock is reachable on foot", clockRange <= REACH, `${clockRange.toFixed(2)}m`);
+  check("the wall clock swings aside when clicked", await noteSays("/recess cut into the wall/"), null);
+
+  // Opening a container and taking what is inside it are two different
+  // things. If the clock handed over the torch, the recess would be scenery.
+  check(
+    "opening the clock does not hand over the torch",
+    (await chips()).includes("TORCH · ?"),
+    await chips()
+  );
+  await shot("2-recess");
+
+  await lookAndClick(TORCH);
+  check("the torch can be taken from the recess", (await chips()).includes("TORCH · OFF"), await chips());
 
   await page.keyboard.press("f");
   await page.waitForTimeout(500);
   await setView((await state()).yaw, -0.15);
-  await shot("2-torch-on");
+  await shot("3-torch-on");
   check("the torch switches on", (await chips()).includes("TORCH · ON"), await chips());
 
-  console.log("\n-- Find the blue gel, but do not fit it yet --");
-  at = await walkTo(GEL, 1.0);
-  await setView(...aim(at, GEL));
-  await shot("3-gel-found");
-  await page.mouse.click(centre.x, centre.y);
-  await page.waitForTimeout(700);
-  check("the gel can be found and picked up", (await chips()).includes("GEL · LOOSE"), await chips());
+  console.log("\n-- Open the book and take the gel, but do not fit it yet --");
+  await route(
+    [[2.5, -4.2], [4.3, -4.0], [4.5, -2.5], [4.5, -0.5], [0, -0.6], [-3.5, -0.6], [-3.5, -1.7]],
+    [BOOK[0], 0, BOOK[2]],
+    1.35
+  );
+  await shot("4-book");
+  const bookRange = await lookAndClick(BOOK, 1100);
+  check("the book is reachable on foot", bookRange <= REACH, `${bookRange.toFixed(2)}m`);
+  check("the book opens when clicked", await noteSays("/pages have been cut away/"), null);
+  check("opening the book does not hand over the gel", (await chips()).includes("GEL · ?"), await chips());
+  await shot("5-book-open");
+
+  await lookAndClick(GEL);
+  check("the gel can be taken from inside the book", (await chips()).includes("GEL · LOOSE"), await chips());
 
   /**
    * The two board checks below are run FROM THE SAME SPOT, aimed at the same
@@ -216,10 +355,10 @@ if (script === "solve") {
    * blank, press one key, prove it is not.
    */
   console.log("\n-- The same paper, raw light then blue --");
-  at = await walkTo(BOARD_PAPER, 1.6);
+  const at = await route([[-3.5, -0.6], [0, -0.6], [4.3, -0.9]], BOARD_PAPER, 1.6);
   await setView(...aim(at, BOARD_PAPER));
   await page.waitForTimeout(1200);
-  await shot("4-board-raw-light");
+  await shot("6-board-raw-light");
   check(
     "raw torchlight lands on the paper and reveals nothing",
     (await tasksText()) === "TASKS 0/5",
@@ -234,7 +373,7 @@ if (script === "solve") {
   // One keypress. Nothing else changes — not position, not aim, not distance.
   await page.keyboard.press("g");
   await page.waitForTimeout(1500);
-  await shot("5-board-blue-light");
+  await shot("7-board-blue-light");
   check("the gel clips over the lens", (await chips()).includes("GEL · FITTED"), await chips());
   check("blue light reveals the phrase", (await tasksText()) === "TASKS 1/5", await tasksText());
   check(
@@ -242,6 +381,16 @@ if (script === "solve") {
     await page.locator("text=YOU GOT THE ANSWER").first().isVisible(),
     null
   );
+
+  console.log("\n-- The desk lamp is signalling --");
+  const lampAt = await route([[4.3, -0.9], [0, -0.6], [0, -2.0]], [-0.2, 0, -3.0], 0.5);
+  await setView(...aim(lampAt, LAMP));
+  // Switch the torch off first: a lit beam pointed at the desk washes the
+  // lamp out and the difference between its two states goes with it.
+  await page.keyboard.press("f");
+  await page.waitForTimeout(600);
+  await shot("8-lamp");
+  check("the desk lamp blinks rather than sitting still", await lampBlinks(), null);
 }
 
 await page.screenshot({ path: out });
