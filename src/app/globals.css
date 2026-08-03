@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+/*
+ * The event's design tokens. The room's markup uses `panel` and
+ * `text-paper-white/70`; the rest are here so the other three puzzles and the
+ * shell drop in without a restyle later.
+ */
+:root {
+  --ink-black: #0a0a0a;
+  --paper-white: #f2efe9;
+  --spider-red: #e63946;
+  --web-blue-dark: #101a4a;
+  --web-blue-light: #4361ee;
+  --glitch-cyan: #22d3ee;
+  --signal-wrong: #f72585;
+}
+
+@theme inline {
+  --color-ink-black: var(--ink-black);
+  --color-paper-white: var(--paper-white);
+  --color-spider-red: var(--spider-red);
+  --color-web-blue-dark: var(--web-blue-dark);
+  --color-web-blue-light: var(--web-blue-light);
+  --color-glitch-cyan: var(--glitch-cyan);
+  --color-signal-wrong: var(--signal-wrong);
+}
+
+body {
+  background: var(--ink-black);
+  color: var(--paper-white);
+}
+
+.panel {
+  border: 2px solid color-mix(in srgb, var(--paper-white) 15%, transparent);
+  background: color-mix(in srgb, var(--ink-black) 60%, transparent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 18px 40px -20px rgba(0, 0, 0, 0.9);
+}
+
+.display-title {
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.anim-pop {
+  animation: pop 180ms ease-out;
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
