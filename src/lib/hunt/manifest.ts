@@ -1,37 +1,34 @@
 /**
- * The five tasks of the Mystery Room: where each sits, and what each carries.
+ * The four loose case items, and where each one is left lying.
  *
- * Array order IS the reveal-code order. MysteryRoom.tsx splits CODES.room
- * (@/lib/hunt/codes) into ROOM_MANIFEST.length equal fragments and shows
- * fragment `i` on task `i` — it never assembles the code from the order a
- * player completes them in, only from this fixed order. ROOM.clues in
- * @/lib/hunt/content is a copy of that same split, kept only so a unit test
- * can assert the two never drift apart; it is NOT seeded into the challenge
- * config and nothing at runtime reads it. Keep that lockstep invariant in
- * mind before reordering this array or changing CODES.room's length.
+ * These are one task between them, not four: section 5 of the room (see
+ * ROOM_SECTIONS in @/lib/hunt/roomTasks). Each carries two letters of that
+ * section's code on its face, readable only once it is picked up and turned
+ * over, and the four together spell the word the player has to type.
  *
- * `kind` decides how a task is completed, and it is the only thing that
- * decides it:
- *
- *   "pickup"  — find the object and click it. Four of the five.
- *   "board"   — the case board on the right wall, which is not picked up at
- *               all: its fragment appears when the hidden phrase is read
- *               under blue-filtered torchlight (MysteryRoomBoard.tsx).
+ * ARRAY ORDER IS LETTER ORDER. MysteryRoom.tsx splits the section's code into
+ * ROOM_MANIFEST.length equal pieces and shows piece `i` on item `i` — it never
+ * assembles anything from the order a player happens to collect them in, only
+ * from this fixed order. Keep that in mind before reordering this array or
+ * changing the length of the code it carries.
  *
  * `shape` selects the geometry MysteryRoomProp draws. `model` overrides it
  * with a GLB: point it at a path under public/ and Model
  * (MysteryRoomModel.tsx) loads it instead, with its own Suspense fallback and
  * an error boundary that fails loudly rather than quietly falling back to the
- * primitive. So swapping in real art really is a manifest edit, with no
- * change needed to either component.
+ * primitive. So swapping in real art really is a manifest edit, with no change
+ * needed to either component.
+ *
+ * The other four sections are not in here, because none of them is an object
+ * lying somewhere: they are a pinboard, a wall of books, a workbench and a
+ * pair of mounted stags, and each owns its own component and its own
+ * coordinates.
  */
-export type PropShape = "folder" | "tin" | "satchel" | "tape" | "board";
+export type PropShape = "folder" | "tin" | "satchel" | "tape";
 
 export interface PropSlot {
   id: string;
   label: string;
-  /** How the task is completed. */
-  kind: "pickup" | "board";
   /** Primitive geometry to draw when `model` is null. */
   shape: PropShape;
   model: string | null;
@@ -44,7 +41,6 @@ export const ROOM_MANIFEST: PropSlot[] = [
   {
     id: "p1",
     label: "Case folder",
-    kind: "pickup",
     shape: "folder",
     model: null,
     // Resting on the desk top (y = 0.6).
@@ -55,7 +51,6 @@ export const ROOM_MANIFEST: PropSlot[] = [
   {
     id: "p2",
     label: "Deed tin",
-    kind: "pickup",
     shape: "tin",
     model: null,
     // Second shelf of the bookcase (plank top y = 1.1).
@@ -66,7 +61,6 @@ export const ROOM_MANIFEST: PropSlot[] = [
   {
     id: "p3",
     label: "Courier satchel",
-    kind: "pickup",
     shape: "satchel",
     model: null,
     // On the pallet (top y = 0.1).
@@ -76,20 +70,7 @@ export const ROOM_MANIFEST: PropSlot[] = [
   },
   {
     id: "p4",
-    label: "Case board",
-    kind: "board",
-    shape: "board",
-    model: null,
-    // Right wall. Position is nominal — the board draws itself, see
-    // MysteryRoomBoard.tsx.
-    position: [5.88, 1.72, -1.0],
-    rotation: [0, -Math.PI / 2, 0],
-    scale: 1,
-  },
-  {
-    id: "p5",
     label: "Data reel",
-    kind: "pickup",
     shape: "tape",
     model: null,
     // On the terminal table (top y = 0.7).

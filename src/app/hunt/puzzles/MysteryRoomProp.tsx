@@ -19,9 +19,20 @@ interface Props {
   dragRef: MutableRefObject<PlayerState>;
 }
 
-/** How far in front of the eye a held object floats. */
+/**
+ * Where a held object floats, relative to the eye.
+ *
+ * OFF TO THE LEFT, and that is not decoration. Held dead centre it covered the
+ * crosshair, and since it is clickable — that is how you put it down — every
+ * click aimed at the next item hit the thing already in your hand instead. The
+ * result was that the second, third and fourth case items simply could not be
+ * picked up: the click landed, something happened, and it was never the thing
+ * the player was pointing at. Held to the left, at the same sort of offset the
+ * torch is held to the right, the middle of the view is clear.
+ */
 const HELD_DISTANCE = 0.8;
-const HELD_DROP = 0.04;
+const HELD_LEFT = 0.46;
+const HELD_DROP = 0.2;
 
 /**
  * One inspectable object.
@@ -48,6 +59,7 @@ export default function Prop({ slot, clue, held, found, onPick, dragRef }: Props
   const home = useMemo(() => new Vector3(...slot.position), [slot.position]);
   const target = useRef(new Vector3());
   const forward = useRef(new Vector3());
+  const right = useRef(new Vector3());
 
   useFrame((_state, delta) => {
     const g = ref.current;
@@ -56,9 +68,14 @@ export default function Prop({ slot, clue, held, found, onPick, dragRef }: Props
 
     if (held) {
       camera.getWorldDirection(forward.current);
+      // The camera's right, on the floor plane: forward crossed with world up.
+      // Taken flat rather than from the camera's own basis so that looking up
+      // or down does not swing the held object across the crosshair again.
+      right.current.set(-forward.current.z, 0, forward.current.x).normalize();
       target.current
         .copy(camera.position)
         .addScaledVector(forward.current, HELD_DISTANCE)
+        .addScaledVector(right.current, -HELD_LEFT)
         .setY(camera.position.y - HELD_DROP + forward.current.y * HELD_DISTANCE);
       g.position.lerp(target.current, k);
       g.rotation.y += delta * 0.6;
@@ -96,6 +113,18 @@ export default function Prop({ slot, clue, held, found, onPick, dragRef }: Props
       ) : (
         <Model path={slot.model} />
       )}
+
+      {/* Enlarged click target.
+          These are the only clickable things in the room that were left as
+          bare geometry, and it showed: a 28cm tin on a shelf, looked down on
+          from a metre away, is a target you have to hunt for with the
+          crosshair. Everything else in here — the drawers, the cartridges, the
+          book spines, the stags — carries a box like this for the same reason,
+          because this is played on a trackpad by someone standing up. */}
+      <mesh>
+        <boxGeometry args={[0.44, 0.34, 0.44]} />
+        <meshBasicMaterial transparent opacity={hovered ? 0.1 : 0} color="#ffd479" />
+      </mesh>
 
       {held && (
         <Text
@@ -265,10 +294,5 @@ function Shape({ shape, found, hovered }: { shape: PropShape; found: boolean; ho
         </group>
       );
 
-    // The board draws itself (MysteryRoomBoard.tsx) and is never rendered
-    // through this component — it is here so the switch is exhaustive and a
-    // new shape cannot be added without deciding what it looks like.
-    case "board":
-      return null;
   }
 }

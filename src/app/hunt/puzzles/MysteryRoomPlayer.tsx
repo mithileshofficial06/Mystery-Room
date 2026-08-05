@@ -23,6 +23,26 @@ export interface PlayerState {
 }
 
 /**
+ * Whether a key event came from somewhere the player is writing.
+ *
+ * The room listens for keys on `window`, because a walk control that only
+ * works while the canvas happens to hold focus is a walk control that stops
+ * working the first time anybody clicks anything. The cost of that is this
+ * function: the code console at the bottom of the viewport is a real text
+ * input, and without this check typing WELCOME into it would walk the player
+ * west, east and back again while they did it.
+ *
+ * Exported so every key handler in the room can agree on the answer — Player
+ * owns WASD and R, MysteryRoom owns F and G, and a guard that only half the
+ * handlers apply is worse than none.
+ */
+export function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+}
+
+/**
  * Look and walk.
  *
  * DELIBERATE DEPARTURE FROM THE ORIGINAL DESIGN. The guide's room had a fixed
@@ -88,6 +108,8 @@ export default function Player({ dragRef }: { dragRef: MutableRefObject<PlayerSt
     };
 
     const keyDown = (e: KeyboardEvent) => {
+      // Someone is typing a code into the console, not driving.
+      if (isTypingTarget(e.target)) return;
       const k = e.key.toLowerCase();
       if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) {
         // Otherwise the arrow keys scroll the page out from under the canvas.

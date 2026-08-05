@@ -93,7 +93,29 @@ export const OBSTACLES: Footprint[] = [
   // Stops short of x=3.94 so the front-right corner stays walkable past it.
   { minX: 2.2, maxX: 3.6, minZ: 3.1, maxZ: 3.9 }, // steamer trunk
   { minX: 0.7, maxX: 1.7, minZ: 3.5, maxZ: 4.2 }, // sack barrow
+  // Shoved flat against the front wall on purpose. Inflated it reaches back to
+  // z = 3.56, which still leaves half a metre of lane in front of the crates
+  // (they stop at 3.04 inflated) for getting to the front-left corner.
+  { minX: -2.2, maxX: -0.4, minZ: 3.9, maxZ: 4.35 }, // web-fluid bench
+  // The reading cupboards on the right wall have NO footprint here, and want
+  // none. They stand at x 5.55..6.0, and the walk bounds already stop the
+  // player at x = 5.16 (5.5 less a body radius) — their front face is 39cm
+  // beyond anywhere a body can be. An entry here would only inflate into the
+  // right-hand corridor, which is the artery to the whole back-right corner.
 ];
+
+/**
+ * Where the desk and the filing cabinets stand.
+ *
+ * Exported because their drawers are interactive and therefore live in
+ * MysteryRoomDrawers.tsx, which has to place itself in exactly the same frame
+ * as the carcass drawn here. One constant each, imported by both, so a drawer
+ * cannot end up floating a hand's width off the front of its own cabinet.
+ */
+export const DESK_AT: [number, number, number] = [-2.2, 0, -3.0];
+export const DESK_YAW = 0.18;
+export const CABINETS_AT: [number, number, number] = [-5.1, 0, -2.2];
+export const CABINETS_YAW = 0.06;
 
 /** One shared palette, so a new piece of furniture doesn't invent its own browns. */
 const C = {
@@ -420,10 +442,16 @@ function Telephone() {
   );
 }
 
-/** Writing desk, chair, Morse lamp, typewriter, telephone, paperwork. */
+/**
+ * Writing desk, chair, Morse lamp, typewriter, telephone, paperwork.
+ *
+ * The three drawers in the right-hand pedestal are not drawn here — they open
+ * when clicked, so they live in MysteryRoomDrawers.tsx along with the cabinet
+ * drawers. What is left here is the carcass they slide into.
+ */
 function Desk() {
   return (
-    <group position={[-2.2, 0, -3.0]} rotation={[0, 0.18, 0]}>
+    <group position={DESK_AT} rotation={[0, DESK_YAW, 0]}>
       {/* Top surface lands at exactly y=0.6 */}
       <Box position={[0, 0.55, 0]} size={[2.6, 0.1, 1.1]} colour={C.wood} />
       {/* Moulded lip along the front edge */}
@@ -432,16 +460,15 @@ function Desk() {
       <Box position={[0.72, 0.25, 0]} size={[0.8, 0.5, 1.0]} colour={C.woodDark} />
       {/* Modesty panel, so the desk is not four legs and a floating slab */}
       <Box position={[-0.25, 0.34, -0.48]} size={[1.9, 0.32, 0.04]} colour={C.woodDark} />
+      {/* Dark mouths cut into the pedestal front, one per drawer. Without them
+          a drawer slides out and leaves a slab of polished walnut behind it,
+          which reads as a sticker peeling off rather than a drawer opening.
+          The fronts themselves are in MysteryRoomDrawers.tsx. */}
       {[0.12, 0.3, 0.46].map((y) => (
-        <group key={y}>
-          <Box position={[0.72, y, 0.51]} size={[0.7, 0.13, 0.03]} colour={C.woodPale} />
-          <Box position={[0.72, y, 0.54]} size={[0.16, 0.03, 0.03]} colour={C.brass} metalness={0.6} roughness={0.4} />
-          {/* Keyhole escutcheon */}
-          <mesh position={[0.45, y, 0.54]}>
-            <cylinderGeometry args={[0.012, 0.012, 0.01, 8]} />
-            <meshStandardMaterial color={C.brass} metalness={0.7} roughness={0.35} />
-          </mesh>
-        </group>
+        <mesh key={y} position={[0.72, y, 0.501]}>
+          <planeGeometry args={[0.68, 0.12]} />
+          <meshStandardMaterial color="#1d1710" roughness={1} />
+        </mesh>
       ))}
 
       {/* Leather blotter, paperwork, inkwell, pen */}
@@ -771,56 +798,32 @@ function Storage() {
 /**
  * Filing cabinets along the left wall.
  *
- * The middle cabinet's top drawer is pulled out and full of hanging files.
- * That drawer used to be where the blue gel sat; it is now empty of anything
- * that matters and stays open purely as a decoy, because the obvious hiding
- * place being obviously empty is what sends a player looking upward — which is
- * where the book actually is (see MysteryRoomTools.tsx).
+ * Nine drawers, all of which open when clicked — they are in
+ * MysteryRoomDrawers.tsx, since they have pointer handlers and nothing in this
+ * file may. What stays here is the carcasses, the dark mouths the drawers
+ * slide out of, and the boxes stacked on top.
+ *
+ * The middle cabinet's top drawer starts open. It used to be where the blue
+ * gel sat; it now holds nothing that matters and stands open purely as a
+ * decoy, because the obvious hiding place being obviously empty is what sends
+ * a player looking upward — which is where the book actually is (see
+ * MysteryRoomTools.tsx).
  */
 function FilingCabinets() {
   return (
-    <group position={[-5.1, 0, -2.2]} rotation={[0, 0.06, 0]}>
-      {[-1.3, 0, 1.3].map((z, idx) => (
+    <group position={CABINETS_AT} rotation={[0, CABINETS_YAW, 0]}>
+      {[-1.3, 0, 1.3].map((z) => (
         <group key={z} position={[0, 0, z]}>
           <Box position={[0, 0.8, 0]} size={[1.4, 1.6, 1.15]} colour={C.metal} metalness={0.35} roughness={0.55} />
           {/* Plinth, so the carcass is not sunk into the floor */}
           <Box position={[0, 0.03, 0]} size={[1.32, 0.06, 1.08]} colour={C.metalDark} />
-          {[0.35, 0.8, 1.25].map((y) => {
-            // Middle cabinet, top drawer: pulled out.
-            const open = idx === 1 && y === 1.25;
-            const out = open ? 0.42 : 0;
-            return (
-              <group key={y} position={[out, 0, 0]}>
-                <Box position={[0.71, y, 0]} size={[0.04, 0.36, 1.0]} colour={C.metalDark} />
-                <Box position={[0.74, y, 0]} size={[0.05, 0.06, 0.32]} colour={C.brass} metalness={0.6} roughness={0.35} />
-                {/* Label card in its holder */}
-                <Box position={[0.74, y + 0.11, 0]} size={[0.02, 0.06, 0.34]} colour={C.metalDark} />
-                <Box position={[0.755, y + 0.11, 0]} size={[0.004, 0.04, 0.3]} colour={C.paperAged} />
-                {open && (
-                  <group>
-                    {/* Drawer walls, so the open one is a container and not a floating face */}
-                    <Box position={[0.5, y - 0.14, 0]} size={[0.46, 0.04, 1.0]} colour={C.metalDark} />
-                    <Box position={[0.5, y, 0.49]} size={[0.46, 0.32, 0.04]} colour={C.metalDark} />
-                    <Box position={[0.5, y, -0.49]} size={[0.46, 0.32, 0.04]} colour={C.metalDark} />
-                    {/* Hanging files */}
-                    {[-0.3, -0.1, 0.12, 0.3].map((fz) => (
-                      <Box
-                        key={fz}
-                        position={[0.5, y + 0.02, fz]}
-                        size={[0.38, 0.28, 0.03]}
-                        colour={C.paperAged}
-                        rotation={[0.08, 0, 0]}
-                      />
-                    ))}
-                    {/* Tabs along the top of the files */}
-                    {[-0.24, 0.02, 0.26].map((fz) => (
-                      <Box key={`tab${fz}`} position={[0.5, y + 0.17, fz]} size={[0.12, 0.04, 0.02]} colour={C.paper} />
-                    ))}
-                  </group>
-                )}
-              </group>
-            );
-          })}
+          {/* Drawer mouths */}
+          {[0.35, 0.8, 1.25].map((y) => (
+            <mesh key={y} position={[0.701, y, 0]} rotation={[0, Math.PI / 2, 0]}>
+              <planeGeometry args={[1.02, 0.38]} />
+              <meshStandardMaterial color="#1b1f26" roughness={1} />
+            </mesh>
+          ))}
         </group>
       ))}
       {/* Boxes of files stacked on top. The gap between them is where the book

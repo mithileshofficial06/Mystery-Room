@@ -21,8 +21,9 @@ export default function RoomPreviewPage() {
       <p className="text-[0.7rem] uppercase tracking-[0.25em] text-glitch-cyan">XPLORE&apos;26</p>
       <h1 className="display-title mt-1 text-4xl text-paper-white">Mystery Room</h1>
       <p className="mt-2 text-sm text-paper-white/60">
-        Five tasks, one code fragment each. Search the room on foot — some of it needs light of the
-        right colour.
+        Five clues hidden in an antique room, and five locked sections down the side. Search on foot,
+        work out what each clue spells, and type it into the console. Every section you open gives up
+        a piece of the code.
       </p>
 
       <div className="my-6">
