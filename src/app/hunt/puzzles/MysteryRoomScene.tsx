@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useRef } from "react";
+import { memo, useMemo, useRef } from "react";
 import type { ReactNode } from "react";
 import { useFrame } from "@react-three/fiber";
+import { Text } from "@react-three/drei";
 import { Color } from "three";
 import type { Group, Mesh, MeshBasicMaterial, PointLight } from "three";
 import { isOnAt, toSpans } from "@/lib/hunt/morse";
@@ -117,32 +118,54 @@ export const DESK_YAW = 0.18;
 export const CABINETS_AT: [number, number, number] = [-5.1, 0, -2.2];
 export const CABINETS_YAW = 0.06;
 
-/** One shared palette, so a new piece of furniture doesn't invent its own browns. */
+/**
+ * One shared palette, so a new piece of furniture doesn't invent its own browns.
+ *
+ * SPIDER-VERSE, NOT SEPIA. The room used to be lit like a museum: warm greys,
+ * mid browns, everything roughly the same value. It read as tasteful and it
+ * played badly, because a search room needs a player to be able to tell "there
+ * is nothing here" from "I cannot see whether there is anything here", and a
+ * flat mid-tone gives you neither.
+ *
+ * So: the base drops most of the way to black and swings violet, and the room
+ * is picked back out by two hard accent colours that never appear in the base —
+ * `magenta` and `cyan`. Everything a player is meant to notice sits in front of
+ * one or the other. That is the whole trick of the look and it is also the
+ * reason it is worth having: colour is now load-bearing, not decoration.
+ *
+ * `paper` and `paperAged` deliberately did NOT come down with everything else.
+ * They are the brightest things in the room by a wide margin now, which is what
+ * makes a sheet of paper on a dark board the thing your eye goes to — and every
+ * word this room has to say is written on one.
+ */
 const C = {
-  floor: "#3b3f49",
-  floorBoard: "#454a55",
-  rug: "#5b4636",
-  rugTrim: "#6f5642",
-  wallLower: "#5b6478",
-  wallUpper: "#6b7488",
-  ceiling: "#525a6b",
-  skirting: "#39404e",
-  wood: "#8a6642",
-  woodDark: "#6a4c2f",
-  woodPale: "#a5825a",
-  metal: "#818995",
-  metalDark: "#4d545f",
-  paper: "#efe7d5",
-  paperAged: "#ded2b6",
-  brass: "#c39b52",
-  green: "#3f6b4e",
-  screen: "#2f8f7d",
-  glass: "#93b8c9",
-  ink: "#20242a",
-  rust: "#7d4a33",
-  enamel: "#2f3a44",
-  cloth: "#4a3b4f",
-  jar: "#a8c4bd",
+  floor: "#231e33",
+  floorBoard: "#2c2540",
+  rug: "#42203d",
+  rugTrim: "#53294a",
+  wallLower: "#292541",
+  wallUpper: "#322d4e",
+  ceiling: "#1f1c31",
+  skirting: "#191730",
+  wood: "#5e4231",
+  woodDark: "#402c22",
+  woodPale: "#7d5942",
+  metal: "#5b6178",
+  metalDark: "#33384b",
+  paper: "#f2ebda",
+  paperAged: "#dccfb2",
+  brass: "#c9963f",
+  green: "#2f6b56",
+  screen: "#2ee6d6",
+  glass: "#8fb6cc",
+  ink: "#141322",
+  rust: "#8a3a4a",
+  enamel: "#262b3d",
+  cloth: "#3c2547",
+  jar: "#7fb0aa",
+  /** The two accents. Nothing structural is ever allowed to be one of these. */
+  magenta: "#ff2d95",
+  cyan: "#22e0ff",
 };
 
 interface BoxProps {
@@ -894,7 +917,11 @@ function TerminalDesk() {
             <meshStandardMaterial color={C.metal} metalness={0.5} roughness={0.5} />
           </mesh>
         ))}
-        <pointLight position={[0, 0.36, 0.7]} intensity={2.2} distance={3} color="#5ce0c8" />
+        {/* The terminal's screen glow was a real point light. It is not any
+            more: the screen face is already a `meshBasicMaterial`, so it is
+            self-lit and reads as switched on regardless, and a 3m light thrown
+            into the room off a monitor was a whole per-fragment light in every
+            material's shader in exchange for a faint teal smear on one desk. */}
         <Box position={[0, 0.02, 0.62]} size={[0.72, 0.05, 0.26]} colour={C.metal} />
         {/* Keys on the keyboard slab */}
         {[0, 1, 2, 3].map((row) =>
@@ -1473,7 +1500,13 @@ function CeilingFan() {
 function Fittings() {
   return (
     <group>
-      {/* Three pendant lamps down the room */}
+      {/* Three pendant lamps down the room.
+          All three keep their shade and their lit bulb; only the middle one
+          carries a point light. Three overlapping 10m lights reached the whole
+          room three times over — the room has one general wash and it does not
+          need to be summed three times per fragment to arrive at it. The two
+          outer shades still read as lit, because the bulb inside them is a
+          `meshBasicMaterial` sphere and always has been. */}
       {[-3.2, -0.4, 2.4].map((z) => (
         <group key={z} position={[0, 0, z]}>
           <mesh position={[0, 4.86, 0]}>
@@ -1497,7 +1530,13 @@ function Fittings() {
             <sphereGeometry args={[0.14, 12, 12]} />
             <meshBasicMaterial color="#fff0d4" />
           </mesh>
-          <pointLight position={[0, 4.0, 0]} intensity={20} distance={11} decay={2} color="#ffe0b8" />
+          {/* Down from 20. The base light dropped by more than half in the
+              retheme, and a pendant left at its old value stopped being a lamp
+              in a dim room and became the only thing in the room. Raised again
+              now that it is carrying the wash the other two used to share. */}
+          {z === -0.4 && (
+            <pointLight position={[0, 4.0, 0]} intensity={20} distance={13} decay={2} color="#ffd9ae" />
+          )}
         </group>
       ))}
 
@@ -1540,26 +1579,234 @@ function Fittings() {
       </group>
 
       {/* Framed notices on the back wall */}
-      {[
-        // Clear of the stove flue, which now rises past x = -2.2.
-        { x: -3.4, y: 3.2, w: 0.9, h: 1.1, tilt: 0 },
-        { x: -0.7, y: 3.05, w: 0.7, h: 0.6, tilt: 0.09 },
-        { x: 3.6, y: 2.6, w: 0.8, h: 1.0, tilt: -0.05 },
-        { x: 4.7, y: 3.3, w: 0.6, h: 0.8, tilt: 0.06 },
-      ].map((f) => (
-        <group key={`${f.x}-${f.y}`} position={[f.x, f.y, ROOM.backZ + 0.07]} rotation={[0, 0, f.tilt]}>
-          <Box position={[0, 0, 0]} size={[f.w, f.h, 0.05]} colour={C.woodDark} />
-          <mesh position={[0, 0, 0.03]}>
-            <planeGeometry args={[f.w - 0.12, f.h - 0.12]} />
-            <meshStandardMaterial color={C.paperAged} roughness={0.95} />
+      {NOTICES.map((f) => (
+        <Notice key={`${f.x}-${f.y}`} notice={f} />
+      ))}
+    </group>
+  );
+}
+
+/**
+ * The framed notices on the back wall.
+ *
+ * These used to be four brown rectangles containing five grey stripes each,
+ * standing in for text nobody would ever read. That was a fair trade when they
+ * were background — but at a metre and a half away they are the biggest flat
+ * surfaces in the room after the case board, and four rectangles of grey
+ * stripes is exactly what a player walks up to, squints at, and files under
+ * "the room is unfinished".
+ *
+ * So they say things now. Nothing in them is a clue and nothing in them is
+ * needed — they are here to make the room feel like a place that was used by
+ * someone, and to give the eye somewhere to land that ISN'T a puzzle. The
+ * departmental voice is the joke: a room full of impossible objects, run by
+ * people who put up a laminate about fire doors.
+ *
+ * Each has a coloured header band in one of the two accents, so the back wall
+ * carries the palette rather than sitting outside it.
+ */
+interface NoticeSpec {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  tilt: number;
+  /** Header band colour. One of the two accents, never a third. */
+  band: string;
+  title: string;
+  /** Body lines. Kept short — this is read from across a room, at an angle. */
+  lines: string[];
+  /** A rubber stamp across the corner, if this one has been dealt with. */
+  stamp?: string;
+}
+
+const NOTICES: NoticeSpec[] = [
+  {
+    // Clear of the stove flue, which now rises past x = -2.2.
+    x: -3.4,
+    y: 3.2,
+    w: 1.0,
+    h: 1.2,
+    tilt: 0,
+    band: C.magenta,
+    title: "ARCHIVE RULES",
+    lines: ["1. SIGN THE LEDGER", "2. ONE CASE AT A TIME", "3. RETURN WHAT YOU OPEN", "4. NO NAKED FLAME"],
+  },
+  {
+    x: -0.7,
+    y: 3.05,
+    w: 0.86,
+    h: 0.66,
+    tilt: 0.09,
+    band: C.cyan,
+    title: "FIRE DOOR",
+    lines: ["KEEP CLEAR AT", "ALL TIMES"],
+  },
+  {
+    x: 3.6,
+    y: 2.6,
+    w: 0.9,
+    h: 1.1,
+    tilt: -0.05,
+    band: C.cyan,
+    title: "INVENTORY",
+    lines: ["CASE 88 — 4 ITEMS", "SIGNED OUT", "NOT RETURNED", "SEE FLOOR SUPERVISOR"],
+    stamp: "OVERDUE",
+  },
+  {
+    x: 4.7,
+    y: 3.3,
+    w: 0.7,
+    h: 0.9,
+    tilt: 0.06,
+    band: C.magenta,
+    title: "NOTICE",
+    lines: ["THIS ROOM IS", "UNDER OBSERVATION"],
+  },
+];
+
+function Notice({ notice: f }: { notice: NoticeSpec }) {
+  const inner = { w: f.w - 0.14, h: f.h - 0.14 };
+  return (
+    <group position={[f.x, f.y, ROOM.backZ + 0.07]} rotation={[0, 0, f.tilt]}>
+      {/* Frame, with a lighter inner bevel so it is a moulding and not a slab */}
+      <Box position={[0, 0, 0]} size={[f.w, f.h, 0.05]} colour={C.woodDark} />
+      <Box position={[0, 0, 0.018]} size={[f.w - 0.05, f.h - 0.05, 0.02]} colour={C.woodPale} />
+      {/* Mount board, then the notice itself sitting on it */}
+      <mesh position={[0, 0, 0.032]}>
+        <planeGeometry args={[inner.w + 0.05, inner.h + 0.05]} />
+        <meshStandardMaterial color="#1d1a2e" roughness={1} />
+      </mesh>
+      <mesh position={[0, 0, 0.034]}>
+        <planeGeometry args={[inner.w, inner.h]} />
+        <meshStandardMaterial color={C.paper} roughness={0.95} />
+      </mesh>
+
+      {/* Header band, and the title reversed out of it */}
+      <mesh position={[0, inner.h / 2 - 0.075, 0.036]}>
+        <planeGeometry args={[inner.w, 0.15]} />
+        <meshBasicMaterial color={f.band} />
+      </mesh>
+      <Text
+        position={[0, inner.h / 2 - 0.075, 0.038]}
+        fontSize={Math.min(0.075, inner.w / (f.title.length * 0.62))}
+        anchorX="center"
+        anchorY="middle"
+        color="#11101c"
+      >
+        {f.title}
+      </Text>
+
+      {/* Body. Left-aligned off the inner edge, like something typed. */}
+      {f.lines.map((line, i) => (
+        <Text
+          key={line}
+          position={[-inner.w / 2 + 0.05, inner.h / 2 - 0.24 - i * 0.13, 0.037]}
+          fontSize={Math.min(0.056, (inner.w - 0.1) / (line.length * 0.6))}
+          anchorX="left"
+          anchorY="middle"
+          color="#2c2740"
+        >
+          {line}
+        </Text>
+      ))}
+
+      {/* Rubber stamp across the bottom corner, at an angle, half off the page */}
+      {f.stamp && (
+        <group position={[0.08, -inner.h / 2 + 0.16, 0.039]} rotation={[0, 0, 0.22]}>
+          <mesh>
+            <planeGeometry args={[inner.w * 0.72, 0.13]} />
+            <meshBasicMaterial color="#a8261f" transparent opacity={0.22} />
           </mesh>
-          {/* Lines of unreadable text, so a frame is not an empty rectangle */}
-          {Array.from({ length: 5 }, (_, i) => (
-            <mesh key={i} position={[0, f.h / 2 - 0.24 - i * 0.12, 0.035]}>
-              <planeGeometry args={[(f.w - 0.24) * (i % 2 ? 0.7 : 1), 0.02]} />
-              <meshBasicMaterial color="#9c9484" />
-            </mesh>
+          <Text fontSize={0.06} anchorX="center" anchorY="middle" color="#a8261f">
+            {f.stamp}
+          </Text>
+        </group>
+      )}
+
+      {/* Glass: a single pale streak across the top corner. Enough to say
+          "there is glass in this frame" without hiding what is behind it. */}
+      <mesh position={[-inner.w * 0.18, inner.h * 0.12, 0.041]} rotation={[0, 0, 0.5]}>
+        <planeGeometry args={[inner.w * 0.28, inner.h * 1.3]} />
+        <meshBasicMaterial color="#ffffff" transparent opacity={0.05} depthWrite={false} />
+      </mesh>
+      {/* Nail and hanging wire */}
+      <mesh position={[0, f.h / 2 + 0.05, 0]}>
+        <sphereGeometry args={[0.014, 8, 8]} />
+        <meshStandardMaterial color={C.metal} metalness={0.6} roughness={0.4} />
+      </mesh>
+    </group>
+  );
+}
+
+/**
+ * Neon tubes clamped to the walls.
+ *
+ * The one piece of set dressing added purely for the look, and the reason the
+ * palette above can afford to be as dark as it is. Two magenta, two cyan, at
+ * picture-rail height on opposite walls, so that every vertical surface in the
+ * room gets a hard coloured edge down one side and falls away to near-black on
+ * the other. That edge is what stops a dark room reading as an underlit one.
+ *
+ * Each tube is a `meshBasicMaterial` bar — unlit, so it stays the accent colour
+ * exactly rather than being dragged toward whatever is illuminating it. Two of
+ * the four also carry a short-range point light for the spill; see `lit` below
+ * for why only two. `distance` is kept tight on purpose: unbounded lights would
+ * wash the whole room back to flat.
+ */
+function NeonTubes() {
+  /**
+   * `lit` is what separates a tube that costs almost nothing from one that
+   * costs real frame time.
+   *
+   * The bar itself is a `meshBasicMaterial` cylinder: unlit, one draw call, and
+   * it looks identical whether or not there is a light inside it — a neon tube
+   * IS a bright bar, and that is the whole read. What costs is the spill, and
+   * spill is a point light, and every point light in this scene is evaluated
+   * per fragment by every lit material in the room whether or not it reaches
+   * them. Four of these were four such lights bought purely for atmosphere.
+   *
+   * Two of them carry the spill now, one per accent colour, placed at opposite
+   * ends of the room so the magenta/cyan clash across the middle survives. The
+   * other two keep their bar and lose their light: they still read as neon,
+   * because a bright bar in a dark room always does, and nothing in the room is
+   * lit by them that is not already reached by their partner.
+   */
+  const tubes: {
+    at: [number, number, number];
+    length: number;
+    colour: string;
+    axis: "x" | "z";
+    lit: boolean;
+  }[] = [
+    { at: [-ROOM.halfWidth + 0.16, 3.55, -3.2], length: 3.4, colour: C.magenta, axis: "z", lit: true },
+    { at: [-ROOM.halfWidth + 0.16, 3.55, 2.2], length: 2.6, colour: C.cyan, axis: "z", lit: true },
+    { at: [ROOM.halfWidth - 0.16, 3.55, -3.6], length: 2.8, colour: C.cyan, axis: "z", lit: false },
+    { at: [0.6, 3.7, ROOM.backZ + 0.18], length: 4.2, colour: C.magenta, axis: "x", lit: false },
+  ];
+
+  return (
+    <group>
+      {tubes.map((t) => (
+        <group key={`${t.at.join()}`} position={t.at}>
+          <mesh rotation={t.axis === "z" ? [Math.PI / 2, 0, 0] : [0, 0, Math.PI / 2]}>
+            <cylinderGeometry args={[0.035, 0.035, t.length, 8]} />
+            <meshBasicMaterial color={t.colour} />
+          </mesh>
+          {/* Bracket at each end, so a tube is fixed to something */}
+          {[-1, 1].map((s) => (
+            <Box
+              key={s}
+              position={
+                t.axis === "z"
+                  ? [0, 0.07, (s * t.length) / 2 - s * 0.1]
+                  : [(s * t.length) / 2 - s * 0.1, 0.07, 0]
+              }
+              size={[0.05, 0.16, 0.05]}
+              colour={C.metalDark}
+            />
           ))}
+          {t.lit && <pointLight intensity={9} distance={5.2} decay={2} color={t.colour} />}
         </group>
       ))}
     </group>
@@ -1569,12 +1816,18 @@ function Fittings() {
 /**
  * Lighting.
  *
- * Taken down a notch from where it was: bright enough to search a corner and
- * tell "nothing here" from "too dark to tell", dim enough that the torch beam
- * reads as a beam and the stove and the desk lamp count for something. The
- * torch is still a puzzle instrument rather than the only way to see — the
- * room is navigable without it, and always has to be, because a player who
- * has not found it yet still has to be able to look for it.
+ * DARK, AND DELIBERATELY SO — but never dark enough to hide a clue. The rule
+ * this is built to has not changed: a player must always be able to tell
+ * "nothing here" from "too dark to tell", because a search room that fails that
+ * test turns into a team clicking every pixel. What changed is how the light
+ * gets there. Instead of one bright neutral wash, it is now a dim violet base
+ * plus hard coloured accents — so contrast does the work that brightness used
+ * to, and the torch beam finally reads as a beam.
+ *
+ * Every fixture that matters to a puzzle keeps its own local light and is
+ * unaffected by this: the bench lamp over the cartridge rack, the two stag
+ * lamps, the pendant over the reading cupboards. Turning the room down can
+ * therefore never turn a task off.
  *
  * Only the ceiling spot casts shadows. Every additional shadow-casting light
  * is a full depth pass per frame, and this runs on whatever laptop is wired
@@ -1583,24 +1836,29 @@ function Fittings() {
 function Lighting() {
   return (
     <group>
-      <ambientLight intensity={0.52} />
+      <ambientLight intensity={0.24} />
       {/* three.js parses #RRGGBB only — an 8-digit hex with alpha is silently
           ignored and warns, so ground colour stays a plain six. */}
-      <hemisphereLight args={["#cddcf0", "#544740", 0.62]} />
+      <hemisphereLight args={["#7b6bd6", "#241a33", 0.42]} />
       <spotLight
         position={[0, 4.7, -1.0]}
         angle={1.0}
-        penumbra={0.7}
-        intensity={72}
+        penumbra={0.75}
+        intensity={38}
         distance={16}
-        color="#fff1dc"
+        color="#e8dcff"
         castShadow
         shadow-mapSize={[1024, 1024]}
       />
-      {/* Cool bounce from the window end */}
-      <pointLight position={[-4.4, 2.4, 1.6]} intensity={12} distance={9} color="#8fb4e0" />
-      {/* Fill so the front wall is not a black slab when the player turns round */}
-      <pointLight position={[0, 2.6, 3.6]} intensity={9} distance={9} color="#ffe8cc" />
+      {/* The two key lights of the whole look: a cyan wash from the window end
+          and a magenta one from the front, meeting somewhere over the rug. The
+          room is deliberately never lit by both at once from the same side —
+          the clash is the point. */}
+      <pointLight position={[-4.4, 2.6, 1.6]} intensity={16} distance={10} decay={2} color={C.cyan} />
+      <pointLight position={[2.8, 2.6, 3.9]} intensity={14} distance={9} decay={2} color={C.magenta} />
+      {/* Fill so the front wall is not a black slab when the player turns round.
+          Warm, and weak, purely so the two accents still read as accents. */}
+      <pointLight position={[0, 2.8, 3.4]} intensity={5} distance={8} color="#ffdcb4" />
     </group>
   );
 }
@@ -1610,8 +1868,20 @@ function Lighting() {
  *
  * Nothing in here has an onClick, so scenery can never be mistaken for a
  * pickup — clicking a filing cabinet does nothing at all.
+ *
+ * MEMOISED, AND IT MATTERS MORE HERE THAN ALMOST ANYWHERE. This component takes
+ * no props and its output never changes, but it is mounted inside MysteryRoom,
+ * which holds a feedback line, a console entry, the lock flag and the section
+ * state. Every one of those updates — every message, every keystroke in the
+ * console, every Ctrl press — re-rendered this entire tree, and this tree is
+ * the whole room: something on the order of a thousand elements, reconciled
+ * from scratch to produce byte-for-byte identical output.
+ *
+ * That is what made the room feel like it was sticking rather than running
+ * slowly. Typing into the console re-reconciled the scenery on every character.
+ * `memo` on a component with no props reduces that to a reference check.
  */
-export default function RoomScene(): ReactNode {
+function RoomSceneImpl(): ReactNode {
   return (
     <group>
       <Lighting />
@@ -1630,6 +1900,11 @@ export default function RoomScene(): ReactNode {
       <Clutter />
       <CeilingFan />
       <Fittings />
+      <NeonTubes />
     </group>
   );
 }
+
+const RoomScene = memo(RoomSceneImpl);
+RoomScene.displayName = "RoomScene";
+export default RoomScene;

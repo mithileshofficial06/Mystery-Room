@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, type MutableRefObject } from "react";
-import { useFrame, useThree } from "@react-three/fiber";
+import { useFrame, useThree, type RootState } from "@react-three/fiber";
 import { OBSTACLES, WALK_BOUNDS } from "./MysteryRoomScene";
 
 /** Pixels of pointer travel between pointerdown and pointerup before a gesture counts as a look-drag rather than a click. */
@@ -43,6 +43,34 @@ export function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 /**
+ * Where the raycast goes while the pointer is locked.
+ *
+ * THIS IS THE PART OF POINTER LOCK PEOPLE FORGET. Once the pointer is locked
+ * the browser stops updating clientX/clientY — they freeze at wherever the
+ * cursor was standing when the lock was taken. R3F's default hit test derives
+ * from exactly those coordinates, so without this every click in mouse-look
+ * mode is fired at a stale point somewhere off to one side of what the player
+ * is actually aiming at. The crosshair is dead centre of the viewport, so
+ * under lock the ray is too, and nothing else about the event system changes.
+ */
+function computeCentred(_event: unknown, state: RootState) {
+  state.pointer.set(0, 0);
+  state.raycaster.setFromCamera(state.pointer, state.camera);
+}
+
+/** R3F's own default, restored when the lock is released. */
+function computeFromPointer(event: { offsetX: number; offsetY: number }, state: RootState) {
+  state.pointer.set(
+    (event.offsetX / state.size.width) * 2 - 1,
+    -(event.offsetY / state.size.height) * 2 + 1
+  );
+  state.raycaster.setFromCamera(state.pointer, state.camera);
+}
+
+/** Radians of turn per pixel of locked mouse movement. */
+const MOUSE_LOOK_SENSITIVITY = 0.0022;
+
+/**
  * Look and walk.
  *
  * DELIBERATE DEPARTURE FROM THE ORIGINAL DESIGN. The guide's room had a fixed
@@ -63,6 +91,17 @@ export function isTypingTarget(target: EventTarget | null): boolean {
  *   - R returns to the spawn point, as the last resort a coordinator can
  *     shout across a hall.
  *
+ * TWO WAYS TO LOOK, and both stay supported for good reasons. Drag-to-look
+ * works with no setup, survives a locked-down browser, and is what a first-time
+ * player does without being told. Ctrl engages pointer lock: the cursor
+ * disappears and the view follows the mouse directly, which is how anyone who
+ * has played a first-person game expects to search a room and is markedly
+ * faster at it. Neither is a mode the room knows about — the rest of the code
+ * only ever reads yaw, pitch and the crosshair.
+ *
+ * The one thing lock genuinely changes is where clicks land, and that is
+ * handled by `computeCentred` above rather than by anything downstream.
+ *
  * `dragRef` is shared with every pickup: a browser's native "click" fires on
  * wherever pointerup lands, regardless of how far the pointer travelled since
  * pointerdown, so without this a look-drag that starts and ends over the same
@@ -70,14 +109,35 @@ export function isTypingTarget(target: EventTarget | null): boolean {
  * threshold and is reset only on the next pointerdown — never on pointerup —
  * so it is still correct when the click that follows pointerup is dispatched.
  */
-export default function Player({ dragRef }: { dragRef: MutableRefObject<PlayerState> }) {
+export default function Player({
+  dragRef,
+  onLockChange,
+}: {
+  dragRef: MutableRefObject<PlayerState>;
+  /** Told whenever mouse-look is engaged or released, so the HUD can react. */
+  onLockChange?: (locked: boolean) => void;
+}) {
   const { camera, gl } = useThree();
+  const setEvents = useThree((s) => s.setEvents);
   const yaw = useRef(0);
   const pitch = useRef(0);
   const pos = useRef<[number, number]>([...SPAWN] as [number, number]);
   const drag = useRef<{ x: number; y: number } | null>(null);
   const gestureStart = useRef<{ x: number; y: number } | null>(null);
   const keys = useRef<Set<string>>(new Set());
+  const locked = useRef(false);
+
+  // Kept in a ref so the big listener effect below does not need it as a
+  // dependency — it is called from inside handlers, never read during setup,
+  // and putting a caller's inline arrow in that dependency array would tear
+  // down and re-attach every listener in this file on every parent render.
+  const lockNotify = useRef(onLockChange);
+  // Written in an effect rather than in the render body: a ref assigned during
+  // render is torn by a re-render React discards, and it is only ever read from
+  // a pointerlockchange handler, which cannot run before the commit.
+  useEffect(() => {
+    lockNotify.current = onLockChange;
+  }, [onLockChange]);
 
   useEffect(() => {
     const el = gl.domElement;
@@ -92,6 +152,18 @@ export default function Player({ dragRef }: { dragRef: MutableRefObject<PlayerSt
       gestureStart.current = null;
     };
     const move = (e: PointerEvent) => {
+      if (locked.current) {
+        // Mouse-look: the browser reports relative movement and nothing else.
+        // `moved` is deliberately NOT set here — under lock there is no drag to
+        // tell apart from a click, and leaving it set would make every click
+        // after the first mouse twitch get swallowed by the drag guard.
+        yaw.current -= e.movementX * MOUSE_LOOK_SENSITIVITY;
+        pitch.current = Math.max(
+          PITCH_MIN,
+          Math.min(PITCH_MAX, pitch.current - e.movementY * MOUSE_LOOK_SENSITIVITY)
+        );
+        return;
+      }
       if (!drag.current) return;
       yaw.current -= (e.clientX - drag.current.x) * LOOK_SENSITIVITY;
       pitch.current = Math.max(
@@ -107,9 +179,50 @@ export default function Player({ dragRef }: { dragRef: MutableRefObject<PlayerSt
       }
     };
 
+    /**
+     * Ctrl toggles mouse-look.
+     *
+     * Ctrl and not click-to-lock, which is the usual choice, because a click IS
+     * the verb of this whole room — every drawer, book, cartridge and stag is
+     * opened with one. Binding lock to click would mean the first click on
+     * anything grabbed the cursor instead of doing the thing.
+     *
+     * `requestPointerLock` needs a user gesture and a keydown is one. It can
+     * still be refused — Chrome rejects a re-lock within about a second of an
+     * Escape-driven exit, on purpose, so that a page cannot trap a cursor — and
+     * a refusal is a rejected promise that must be swallowed or it surfaces as
+     * an unhandled error in the console of a room that is working fine.
+     */
+    const toggleLock = () => {
+      if (document.pointerLockElement === el) {
+        document.exitPointerLock();
+        return;
+      }
+      const request = el.requestPointerLock() as unknown;
+      if (request instanceof Promise) request.catch(() => undefined);
+    };
+
+    const lockChange = () => {
+      const on = document.pointerLockElement === el;
+      locked.current = on;
+      // Any half-finished drag belongs to the other mode.
+      drag.current = null;
+      gestureStart.current = null;
+      dragRef.current.moved = false;
+      setEvents({ compute: on ? computeCentred : computeFromPointer });
+      lockNotify.current?.(on);
+    };
+
     const keyDown = (e: KeyboardEvent) => {
       // Someone is typing a code into the console, not driving.
       if (isTypingTarget(e.target)) return;
+      // Ctrl on its own. `e.key === "Control"` is only ever the modifier being
+      // pressed by itself; Ctrl+C arrives as key "c" and never reaches here.
+      if (e.key === "Control" && !e.repeat) {
+        e.preventDefault();
+        toggleLock();
+        return;
+      }
       const k = e.key.toLowerCase();
       if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) {
         // Otherwise the arrow keys scroll the page out from under the canvas.
@@ -128,6 +241,7 @@ export default function Player({ dragRef }: { dragRef: MutableRefObject<PlayerSt
     window.addEventListener("keydown", keyDown);
     window.addEventListener("keyup", keyUp);
     window.addEventListener("blur", blur);
+    document.addEventListener("pointerlockchange", lockChange);
     return () => {
       el.removeEventListener("pointerdown", down);
       window.removeEventListener("pointerup", up);
@@ -135,8 +249,11 @@ export default function Player({ dragRef }: { dragRef: MutableRefObject<PlayerSt
       window.removeEventListener("keydown", keyDown);
       window.removeEventListener("keyup", keyUp);
       window.removeEventListener("blur", blur);
+      document.removeEventListener("pointerlockchange", lockChange);
+      // Leaving the room with the cursor still captured would strand it.
+      if (document.pointerLockElement === el) document.exitPointerLock();
     };
-  }, [gl, dragRef]);
+  }, [gl, dragRef, setEvents]);
 
   useFrame((_state, delta) => {
     const k = keys.current;

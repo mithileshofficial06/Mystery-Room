@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useFrame } from "@react-three/fiber";
 import { ROOM_MANIFEST } from "@/lib/hunt/manifest";
 import { CODES } from "@/lib/hunt/codes";
 import {
@@ -91,6 +91,10 @@ export default function MysteryRoom({ onSolve }: PuzzleProps) {
   const [rejected, setRejected] = useState(false);
   /** A book is being held open in front of the player. The room dims behind it. */
   const [reading, setReading] = useState(false);
+  /** Mouse-look is engaged: the cursor is captured and hidden. See Player. */
+  const [locked, setLocked] = useState(false);
+  /** The completion card has been closed. It can be brought back from the rail. */
+  const [dismissed, setDismissed] = useState(false);
 
   // Shared between Player and every clickable — see Player's doc comment.
   const dragRef = useRef<PlayerState>({ moved: false });
@@ -239,13 +243,56 @@ export default function MysteryRoom({ onSolve }: PuzzleProps) {
 
   return (
     <div>
-      <div className="panel relative h-[640px] w-full overflow-hidden">
-        <RoomBoundary>
-          <Canvas shadows camera={{ fov: 55, position: [0, 1.62, 3.2] }}>
-            <color attach="background" args={["#0b0e14"]} />
-            <fogExp2 attach="fog" args={["#141a24", 0.014]} />
+      {/* THE VIEWPORT IS THE PUZZLE, so it gets the screen.
+          It was a flat 640px, which on a laptop left the room occupying rather
+          less than half the window while the rest of the page showed a heading
+          and some whitespace. Everything this task asks a player to do is
+          reading small things at a distance — a batch number stamped on a rack,
+          one book out of thirty, a word in a web — and every one of those is a
+          function of how many pixels the thing lands on.
 
-            <Player dragRef={dragRef} />
+          Sized off the viewport rather than fixed, with a floor so it cannot
+          collapse on a short window and a ceiling so it does not become
+          unreadable on a 4K monitor. `cursor-none` while mouse-look is engaged:
+          the pointer is captured and invisible, and a stale arrow left drawn
+          over the crosshair is the thing that makes a locked view feel broken. */}
+      <div
+        className={`panel relative h-[min(80vh,900px)] min-h-[520px] w-full overflow-hidden ${
+          locked ? "cursor-none" : ""
+        }`}
+      >
+        <RoomBoundary>
+          {/* WHY THIS CANVAS IS CONFIGURED AND NOT LEFT ON DEFAULTS.
+              Making the viewport bigger multiplied the cost of every pixel
+              decision that had been getting away with it at 640px, and the room
+              went from smooth to visibly laggy. Three defaults were doing the
+              damage, and all three are wrong for this scene specifically:
+
+              `dpr` defaults to the display's own pixel ratio. On a 2x laptop
+              panel that is four times the fragment work for a scene whose art
+              is flat-shaded primitives with a halftone screen printed over the
+              top — there is no detail in it that survives to reward the extra
+              pixels. Capped at 1.5, which still looks sharp on a projector and
+              is the single biggest win available here.
+
+              `antialias` defaults to on. MSAA over a canvas this size is not
+              cheap, and the halftone overlay is already dithering every edge in
+              the room; the aliasing it would fix is not visible through it.
+
+              `powerPreference` defaults to letting the browser choose, which on
+              a laptop with switchable graphics means the integrated GPU. This
+              is the one thing on the page and it should get the real one. */}
+          <Canvas
+            shadows
+            dpr={[1, 1.5]}
+            gl={{ antialias: false, powerPreference: "high-performance" }}
+            camera={{ fov: 55, position: [0, 1.62, 3.2] }}
+          >
+            <color attach="background" args={["#06040d"]} />
+            <fogExp2 attach="fog" args={["#150e22", 0.021]} />
+
+            <FreezeShadows />
+            <Player dragRef={dragRef} onLockChange={setLocked} />
             <RoomScene />
             <Drawers dragRef={dragRef} onNote={say} />
 
@@ -347,19 +394,169 @@ export default function MysteryRoom({ onSolve }: PuzzleProps) {
           note={note}
           rejected={rejected}
           reading={reading}
+          locked={locked}
           onSubmit={submit}
         />
+
+        {complete && !dismissed && (
+          <Completion fragments={fragments} onClose={() => setDismissed(true)} />
+        )}
+        {complete && dismissed && (
+          <button
+            type="button"
+            onClick={() => setDismissed(false)}
+            className="absolute left-4 top-14 z-20 rounded border border-[#ff2d95]/70 bg-[#2a0a1c]/95 px-3 py-1.5 font-mono text-[0.62rem] tracking-widest text-[#ff9dcb] transition-colors hover:bg-[#43102c]"
+          >
+            ROOM SOLVED · SHOW CODE
+          </button>
+        )}
       </div>
 
       <p className="mt-3 text-sm text-paper-white/70">
         <strong className="text-paper-white">WASD</strong> or arrow keys to walk,{" "}
-        <strong className="text-paper-white">drag</strong> to look,{" "}
+        <strong className="text-paper-white">drag</strong> to look or{" "}
+        <strong className="text-paper-white">Ctrl</strong> for mouse-look,{" "}
         <strong className="text-paper-white">click</strong> to open and pick things up,{" "}
         <strong className="text-paper-white">R</strong> to return to the door. Type each code you find into
         the console. Opened {opened.length} of {ROOM_SECTIONS.length}.
       </p>
     </div>
   );
+}
+
+/**
+ * The card that comes up when the fifth section opens.
+ *
+ * The room used to end without saying so. The last fragment appeared in the
+ * rail, the code went up to the shell, and that was it — no moment, no
+ * confirmation, nothing to point at. In a hall, with five people round one
+ * laptop, that is the difference between a team knowing they have finished and
+ * a team asking whether they have finished.
+ *
+ * It is dismissible and it can be brought back, because the first thing anyone
+ * does with a card covering the room is close it, and the second thing is want
+ * the code again.
+ *
+ * `onClose` is what closes it and nothing else: no timer. A congratulation that
+ * disappears on its own is a congratulation somebody missed while they were
+ * turning round to tell the rest of their team.
+ */
+function Completion({ fragments, onClose }: { fragments: string[]; onClose: () => void }) {
+  const code = fragments.join("");
+  return (
+    // A full-screen `backdrop-blur` here was the single most expensive thing on
+    // the page: it blurs the entire live canvas, and the canvas keeps redrawing
+    // underneath it, so the blur is recomputed every frame for as long as the
+    // card is up. Exactly the moment the room should feel like a reward. A
+    // heavier flat wash reads the same and costs one fill.
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-[#06040d]/92 p-6">
+      <div className="relative w-full max-w-lg overflow-hidden rounded-xl border-2 border-[#ff2d95] bg-[#120a1e] p-7 text-center shadow-[0_0_60px_rgba(255,45,149,0.35)]">
+        {/* Halftone wash and a cyan corner flare, so the card belongs to the
+            room it is sitting on top of rather than to the browser. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 opacity-40"
+          style={{
+            backgroundImage: "radial-gradient(rgba(255,255,255,0.14) 1px, transparent 1.2px)",
+            backgroundSize: "5px 5px",
+          }}
+        />
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0"
+          style={{
+            background:
+              "radial-gradient(circle at 12% 0%, rgba(34,224,255,0.32) 0%, transparent 48%), radial-gradient(circle at 92% 100%, rgba(255,45,149,0.3) 0%, transparent 46%)",
+          }}
+        />
+
+        <div className="relative">
+          <p className="font-mono text-[0.62rem] tracking-[0.4em] text-[#22e0ff]">ALL FIVE SECTIONS OPEN</p>
+          <h2 className="display-title mt-2 text-3xl text-paper-white">The room is yours</h2>
+          <p className="mx-auto mt-2 max-w-sm text-sm text-paper-white/65">
+            Every clue read, every word entered. The sections hand up their fragments in order.
+          </p>
+
+          <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+            {fragments.map((fragment, i) => (
+              <span
+                key={`${fragment}-${i}`}
+                className="rounded border border-[#22e0ff]/60 bg-[#062431]/80 px-3 py-2 font-mono text-lg tracking-[0.25em] text-[#bfefff]"
+              >
+                {fragment}
+              </span>
+            ))}
+          </div>
+
+          <p className="mt-5 font-mono text-[0.62rem] tracking-[0.35em] text-paper-white/45">REVEAL CODE</p>
+          <p className="mt-1 font-mono text-4xl tracking-[0.3em] text-[#ff2d95]">{code}</p>
+
+          {/* NO `autoFocus` ON THIS BUTTON, and that is not a style preference.
+              The last thing a player does before this card exists is type the
+              fifth word into the console and press Enter. Focusing the dismiss
+              button the instant the card mounts puts that button under the very
+              keystroke that opened it — so the card appeared and closed inside
+              one frame, and what the room actually showed was the "ROOM SOLVED"
+              badge, as if the celebration had been skipped. Which it had.
+
+              It cost the harness two checks and would have cost a team in a
+              hall the only moment the room has. Nothing here is focused now;
+              the card is closed by clicking it, deliberately. */}
+          <button
+            type="button"
+            onClick={onClose}
+            className="mt-6 rounded border border-[#ff2d95]/70 bg-[#2a0a1c] px-5 py-2 font-mono text-xs tracking-[0.25em] text-[#ff9dcb] transition-colors hover:bg-[#43102c]"
+          >
+            BACK TO THE ROOM
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Renders the shadow map a few times, then stops.
+ *
+ * WHAT THIS BUYS. Shadows are a second render of every shadow-casting object in
+ * the room, from the light's point of view, and measurement put that at 418 of
+ * the room's 1221 draw calls per frame — a third of all the work, repeated
+ * sixty times a second to produce an image that is identical every time. The
+ * room is a room: the walls, the desk, the cabinets, the crates and the shelves
+ * do not move, and the one light that casts shadows is bolted to the ceiling.
+ *
+ * WHAT IT COSTS, STATED PLAINLY. Things that move after the freeze keep the
+ * shadow they had when it happened — an opened drawer casts its closed shadow.
+ * That is a real artefact and the reason to know about it. It survives here
+ * because of what this particular room looks like: one soft ceiling spot at
+ * high penumbra, over furniture, in a scene whose actual light comes from
+ * coloured point lights that never cast at all. The moving things are small
+ * (a drawer front, a book, a 5cm cartridge) and their shadows are diffuse
+ * enough at that penumbra that there is nothing legible to go stale.
+ *
+ * The warm-up is frames rather than a timer because what has to be finished is
+ * a render, not an interval — materials compile lazily on first sight, and a
+ * shadow map frozen before the room has been drawn once is a blank one.
+ */
+function FreezeShadows({ frames = 8 }: { frames?: number }) {
+  const drawn = useRef(0);
+
+  // The renderer comes off the frame state rather than out of `useThree`. It is
+  // the same object either way, but this hook mutates it, and a value returned
+  // from a hook is not ours to mutate as far as the react-hooks lint rules are
+  // concerned — correctly, in general. `state` is an argument.
+  useFrame((state) => {
+    if (drawn.current > frames) return;
+    drawn.current += 1;
+    if (drawn.current > frames) {
+      state.gl.shadowMap.autoUpdate = false;
+      // One last update, so what is frozen is the finished room and not
+      // whatever the last warm-up frame happened to catch.
+      state.gl.shadowMap.needsUpdate = true;
+    }
+  });
+
+  return null;
 }
 
 interface HudProps {
@@ -376,6 +573,8 @@ interface HudProps {
   rejected: boolean;
   /** A book is open in front of the player. */
   reading: boolean;
+  /** Mouse-look is engaged. */
+  locked: boolean;
   onSubmit: (entry: string) => boolean;
 }
 
@@ -405,10 +604,39 @@ function Hud({
   note,
   rejected,
   reading,
+  locked,
   onSubmit,
 }: HudProps) {
   return (
     <div className="pointer-events-none absolute inset-0 flex flex-col p-4">
+      {/* THE SPIDER-VERSE PASS, done here and not in the scene.
+          A halftone screen and a chromatic edge fringe are the two things that
+          read instantly as comic-book print, and both are properties of the
+          image rather than of the room — which means they belong on a DOM layer
+          over the canvas, where they cost one composite, than in a post-
+          processing chain, where they cost a full-screen pass per frame on
+          whatever laptop is wired to the projector on the day.
+
+          Both are kept weak on purpose. Turned up to where they read as an
+          effect they also cover a stamped batch number and a word in a web,
+          which are the things this room exists to make readable. */}
+      <div
+        aria-hidden
+        className="absolute inset-0 opacity-[0.32] mix-blend-overlay"
+        style={{
+          backgroundImage: "radial-gradient(rgba(255,255,255,0.5) 1px, transparent 1.15px)",
+          backgroundSize: "4px 4px",
+        }}
+      />
+      <div
+        aria-hidden
+        className="absolute inset-0"
+        style={{
+          background:
+            "radial-gradient(ellipse 76% 76% at 50% 50%, transparent 52%, rgba(255,45,149,0.2) 100%)," +
+            "radial-gradient(ellipse 66% 70% at 47% 53%, transparent 56%, rgba(34,224,255,0.16) 100%)",
+        }}
+      />
       {/* Everything but the open book goes dark.
           A vignette rather than a flat wash, because this overlay sits on top
           of the canvas and a flat one would dim the book along with the room.
@@ -425,33 +653,52 @@ function Hud({
             "radial-gradient(ellipse 36% 46% at 42% 54%, rgba(5,7,12,0) 0%, rgba(5,7,12,0.55) 62%, rgba(5,7,12,0.88) 100%)",
         }}
       />
-      <div className="flex items-start justify-between gap-3">
-        <div className="rounded bg-black/55 px-3 py-1.5 font-mono text-xs tracking-widest text-paper-white/85 backdrop-blur-sm">
+      <div className="relative flex items-start justify-between gap-3">
+        <div className="rounded border border-[#22e0ff]/40 bg-black/80 px-3 py-1.5 font-mono text-xs tracking-widest text-[#bfefff]">
           SECTIONS {opened.length}/{fragments.length}
         </div>
         <div className="flex gap-2">
+          <Chip active={locked} label={locked ? "MOUSE LOOK · CTRL TO RELEASE" : "CTRL · MOUSE LOOK"} />
           <Chip active={torchTaken} label={torchTaken ? (torchOn ? "TORCH · ON" : "TORCH · OFF") : "TORCH · ?"} />
           <Chip active={filmTaken} label={filmTaken ? (filmOn ? "GEL · FITTED" : "GEL · LOOSE") : "GEL · ?"} />
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 items-center gap-3">
-        <div className="flex-1">
+      {/* `items-stretch`, not `items-center`. Centred, the rail was sized to its
+          content and then clipped by this row — so the first and last sections
+          were cut in half and the two clues that matter most were the two you
+          could not read. Stretched, it gets the full height between the chips
+          and the console, which is what all five sections need. */}
+      <div className="relative flex min-h-0 flex-1 items-stretch gap-3">
+        <div className="flex flex-1 items-center justify-center">
           {/* Crosshair — with a walkable camera, a fixed centre point is what
-              makes aiming the beam at a specific sheet of paper possible. */}
-          <div className="mx-auto h-1.5 w-1.5 rounded-full bg-paper-white/45" />
+              makes aiming the beam at a specific sheet of paper possible. It
+              grows a ring under mouse-look, where it is the only thing on
+              screen telling the player where the pointer has gone.
+              `relative` so the centre dot below has something to be absolute
+              against — without it, it resolves against the whole HUD. */}
+          <div className="relative flex h-6 w-6 items-center justify-center">
+            <div
+              className={`rounded-full transition-all ${
+                locked
+                  ? "h-5 w-5 border border-[#22e0ff]/70 bg-[#22e0ff]/10"
+                  : "h-1.5 w-1.5 bg-paper-white/45"
+              }`}
+            />
+            {locked && <div className="absolute h-1 w-1 rounded-full bg-[#22e0ff]" />}
+          </div>
         </div>
         <TaskRail fragments={fragments} opened={opened} read={read} />
       </div>
 
-      <div className="space-y-2">
+      <div className="relative space-y-2">
         {itemLetters && (
-          <p className="mx-auto w-fit rounded border border-[#c39b52] bg-[#2a1f10]/85 px-4 py-1.5 font-mono text-sm tracking-[0.35em] text-[#f0d9a8] backdrop-blur-sm">
+          <p className="mx-auto w-fit rounded border border-[#c39b52] bg-[#2a1f10]/95 px-4 py-1.5 font-mono text-sm tracking-[0.35em] text-[#f0d9a8]">
             {itemLetters.join(" ")}
           </p>
         )}
         {note && (
-          <p className="mx-auto w-fit max-w-[46rem] text-center rounded bg-black/70 px-3 py-1.5 text-sm text-paper-white/90 backdrop-blur-sm">
+          <p className="mx-auto w-fit max-w-[46rem] text-center rounded bg-black/85 px-3 py-1.5 text-sm text-paper-white/90">
             {note}
           </p>
         )}
@@ -464,11 +711,19 @@ function Hud({
 /**
  * The five sections, down the right-hand side.
  *
- * A locked section shows its hint, so the rail doubles as the list of what is
- * left to look for — five padlocks with no text would tell a stuck team
+ * A locked section shows BOTH of its clues, so the rail doubles as the list of
+ * what is left to look for — five padlocks with no text would tell a stuck team
  * nothing except that they are stuck. A section whose clue has been solved but
- * whose word has not been typed is marked, because the gap between those two
- * is exactly the thing a player is most likely to lose track of.
+ * whose word has not been typed is marked, because the gap between those two is
+ * exactly the thing a player is most likely to lose track of.
+ *
+ * WHY BOTH CLUES ARE SHOWN AT ONCE rather than the second being bought,
+ * unlocked or timed. This is a preview room with no hint economy in it — that
+ * lives in the shell (guide §6.2), which is the thing that knows about scores.
+ * Building a second gate in here would either duplicate that or, worse, quietly
+ * disagree with it. And a stuck team standing in a hall does not need a button
+ * that admits they are stuck; they need the sentence. The clues are written so
+ * that reading both still leaves all of the doing.
  */
 function TaskRail({
   fragments,
@@ -480,7 +735,18 @@ function TaskRail({
   read: SectionId[];
 }) {
   return (
-    <ul className="pointer-events-auto flex w-60 shrink-0 flex-col gap-1.5 overflow-y-auto rounded-lg bg-black/55 p-2 backdrop-blur-sm">
+    // `justify-between` spreads the five sections down the full height rather
+    // than stacking them at the top, so the space this rail was given is the
+    // space the clues actually get. `overflow-y-auto` stays as a backstop for a
+    // very short window, but at the sizes below it should never engage.
+    //
+    // NO `backdrop-blur` HERE ANY MORE. This is the largest always-visible
+    // surface on the page and it sits directly over a canvas that redraws every
+    // frame, so the blur behind it had to be recomputed every frame too — for a
+    // panel whose background is nearly opaque and whose whole job is to be
+    // readable against whatever is behind it. Raised to bg-black/80 instead:
+    // strictly more legible, and free.
+    <ul className="pointer-events-auto flex w-72 shrink-0 flex-col justify-between gap-1 overflow-y-auto rounded-lg border border-white/10 bg-black/80 p-2">
       {ROOM_SECTIONS.map((section, i) => {
         const isOpen = opened.includes(section.id);
         const isRead = read.includes(section.id);
@@ -489,27 +755,48 @@ function TaskRail({
             key={section.id}
             className={`rounded border px-2.5 py-2 transition-colors ${
               isOpen
-                ? "border-[#3f7bff]/70 bg-[#0a1836]/80"
+                ? "border-[#22e0ff]/70 bg-[#062431]/80"
                 : isRead
-                  ? "border-[#c39b52]/60 bg-[#241a0c]/70"
+                  ? "border-[#ff2d95]/60 bg-[#2a0a1c]/70"
                   : "border-white/10 bg-black/35"
             }`}
           >
             <div className="flex items-baseline justify-between gap-2">
               <span
                 className={`font-mono text-[0.62rem] tracking-widest ${
-                  isOpen ? "text-[#9fc6ff]" : "text-paper-white/45"
+                  isOpen ? "text-[#7fdcff]" : "text-paper-white/45"
                 }`}
               >
                 {String(i + 1).padStart(2, "0")} · {section.title.toUpperCase()}
               </span>
-              <span className={`font-mono text-sm ${isOpen ? "text-[#bfe0ff]" : "text-paper-white/30"}`}>
+              <span className={`font-mono text-sm ${isOpen ? "text-[#bfefff]" : "text-paper-white/30"}`}>
                 {isOpen ? fragments[i] : "──"}
               </span>
             </div>
-            <p className="mt-1 text-[0.68rem] leading-snug text-paper-white/55">
-              {isOpen ? "Open." : isRead ? "Solved. Type the word into the console." : section.hint}
-            </p>
+
+            {isOpen ? (
+              <p className="mt-1 text-[0.68rem] leading-snug text-[#7fdcff]/80">Open.</p>
+            ) : isRead ? (
+              <p className="mt-1 text-[0.68rem] leading-snug text-[#ff9dcb]">
+                Solved. Type the word into the console.
+              </p>
+            ) : (
+              // Both clues were being drawn at 55% white over a background that
+              // is itself over a moving room. That is fine for a label and not
+              // fine for the only text in the room a stuck team is going to
+              // read — so the clues are now at 85%, and the numbers that index
+              // them are a solid accent rather than a tinted one.
+              <ol className="mt-1.5 space-y-1">
+                {section.hints.map((hint, h) => (
+                  <li key={hint} className="flex gap-1.5">
+                    <span className="mt-px shrink-0 font-mono text-[0.55rem] leading-[1.5] tracking-widest text-[#ff2d95]">
+                      {h + 1}
+                    </span>
+                    <span className="text-[0.68rem] leading-[1.35] text-paper-white/85">{hint}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
           </li>
         );
       })}
@@ -548,11 +835,11 @@ function CodeConsole({
 
   return (
     <div
-      className={`pointer-events-auto mx-auto flex w-full max-w-2xl items-center gap-2 rounded-lg border px-3 py-2 backdrop-blur-sm transition-colors ${
-        rejected ? "border-[#c8352f] bg-[#2a0e0c]/85" : "border-white/15 bg-black/70"
+      className={`pointer-events-auto mx-auto flex w-full max-w-2xl items-center gap-2 rounded-lg border px-3 py-2 transition-colors ${
+        rejected ? "border-[#ff2d95] bg-[#2a0a1c]/95" : "border-[#22e0ff]/30 bg-black/85"
       }`}
     >
-      <span aria-hidden className="font-mono text-sm text-[#9fc6ff]">
+      <span aria-hidden className="font-mono text-sm text-[#22e0ff]">
         &gt;
       </span>
       <input
@@ -574,7 +861,7 @@ function CodeConsole({
       <button
         type="button"
         onClick={send}
-        className="shrink-0 rounded bg-[#1a2c52] px-3 py-1 font-mono text-[0.68rem] tracking-widest text-[#bfe0ff] transition-colors hover:bg-[#24407a]"
+        className="shrink-0 rounded bg-[#0d3a4a] px-3 py-1 font-mono text-[0.68rem] tracking-widest text-[#bfefff] transition-colors hover:bg-[#155a72]"
       >
         ENTER
       </button>
@@ -585,8 +872,8 @@ function CodeConsole({
 function Chip({ active, label }: { active: boolean; label: string }) {
   return (
     <span
-      className={`rounded px-2 py-1 font-mono text-[0.65rem] tracking-widest backdrop-blur-sm ${
-        active ? "bg-[#0a1836]/80 text-[#9fc6ff]" : "bg-black/50 text-paper-white/40"
+      className={`rounded px-2 py-1 font-mono text-[0.65rem] tracking-widest ${
+        active ? "bg-[#062431]/90 text-[#7fdcff]" : "bg-black/70 text-paper-white/50"
       }`}
     >
       {label}

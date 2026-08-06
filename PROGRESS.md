@@ -41,7 +41,8 @@ npm run dev -- -p 3100     # http://localhost:3100
 | `npm run typecheck` | `tsc --noEmit`. |
 | `npm run lint` | ESLint, including the puzzle-contract rules. |
 | `npm run shoot` | Screenshot the opening view into `shots/`. |
-| `npm run shoot -- --script solve` | Play the entire room in a real browser and assert 45 things. ~12 minutes. |
+| `npm run shoot -- --script solve` | Play the entire room in a real browser and assert everything. ~12 minutes. |
+| `npm run perf` | Draw calls and triangles per frame. See [Performance](#performance). |
 
 `npm run shoot` needs the dev server already running on port 3100. Pass
 `--url http://localhost:3000/` to point it somewhere else.
@@ -56,12 +57,50 @@ All five are built and all five are verified end to end.
 | --- | --- | --- | --- |
 | 1 | The case board | `LANTERN` | Ink on a pinned sheet that only develops under blue-filtered torchlight. |
 | 2 | The reading cupboards | `GRIMOIRE` | Thirty books on the right wall, all pullable. The wrong ones open, say so, and put themselves back. The right one riffles through to a word. |
-| 3 | The fluid bench | `WEBLINE` | Eight cartridges, one still full. Load the shooter and it puts a web across the bench with a word in it. |
+| 3 | The fluid bench | `WEBLINE` | Twelve cartridges, all of them full, none of them distinguishable by eye. The spec card on the pegboard names the live batch. Load the shooter and it puts a web across the bench with a word in it. |
 | 4 | The two stags | `ANTLERS` | Two mounted heads on opposite walls. Turn **both** upside down and their eyes throw beams that cross on the floor. |
 | 5 | The case items | `INKSTAND` | Four loose objects in four corners, two letters stamped on each face. |
 
 The rail shows each section's fragment once it is open: `AR CH IV ES 88`, split
-client-side in rail order. The fragments never travel over the network.
+client-side in rail order. The fragments never travel over the network. When the
+fifth opens, a completion card comes up over the room with the assembled code on
+it — dismissible, and recallable from a button on the rail, because the first
+thing anyone does with a card covering the room is close it and the second is
+want the code back.
+
+### Two clues per task
+
+Every section carries **two** clues rather than one, and they are different
+kinds of clue on purpose:
+
+1. **Where.** Names the place. Enough to walk to, useless for solving.
+2. **How.** The one property a player will not get by clicking harder — that
+   the ink needs a colour of light, that the book is shelved upside down, that
+   the rack has a spec card, that one stag over is worth nothing, that the four
+   faces have an order.
+
+Neither is ever the answer, and neither is a sequence of clicks. Both are shown
+at once, not bought or timed: the hint economy lives in the shell (guide §6.2),
+and a second gate in here would either duplicate it or quietly disagree with it.
+`roomTasks.test.ts` asserts every section has exactly two, that they differ, and
+that neither contains its own answer.
+
+### The look
+
+Spider-verse, not sepia. The base palette drops most of the way to black and
+swings violet, and the room is picked back out by two accents that never appear
+in the base — magenta `#ff2d95` and cyan `#22e0ff`. Neon tubes at picture-rail
+height give every vertical surface a hard coloured edge down one side, which is
+what stops a dark room reading as an underlit one. A halftone screen and a
+chromatic edge fringe sit on a DOM layer over the canvas rather than in a
+post-processing chain — one composite instead of a full-screen pass per frame on
+whatever laptop is wired to the projector.
+
+Colour is load-bearing here, not decoration: `paper` deliberately did not come
+down with everything else, so a sheet of paper is now the brightest thing in the
+room, and every word this room has to say is written on one. Every fixture that
+matters to a puzzle keeps its own local light, so turning the room down can
+never turn a task off.
 
 ### The tools
 
@@ -127,6 +166,7 @@ src/
     morse.ts + test           Morse encoding for the desk lamp.
 scripts/
   shoot-room.mjs              Headless-browser verification harness.
+  perf-room.mjs               Draw calls and triangles per frame.
 docs/
   XPLORE26-...-guide.pdf      The source guide.
 ```
@@ -215,6 +255,59 @@ once, and a pass would prove nothing about which condition was doing the work.
 
 ---
 
+## Performance
+
+The room went visibly laggy after the retheme, and it was not one thing. Making
+the viewport bigger multiplied the cost of every decision that had been getting
+away with it at 640px, and the retheme itself added lights. Measured with
+`npm run perf`, which counts draw calls by wrapping the WebGL draw entry points:
+
+| | Before | After |
+| --- | --- | --- |
+| Draw calls per frame | 1221 | 810 |
+| Triangles per frame | 25.5k | 17.6k |
+
+Read draw calls, not the frame times that script also prints. Headless Chromium
+rasterises on the CPU, so its FPS is two orders of magnitude out and moves with
+whatever else the machine is doing. Draw calls are identical on every GPU.
+
+What was done, roughly in order of how much it was worth:
+
+- **`dpr` capped at 1.5** on the Canvas. It defaults to the display's own pixel
+  ratio, so a 2x laptop panel was shading four times the pixels for art that is
+  flat-shaded primitives under a halftone screen. This is almost certainly the
+  largest real-world win and `npm run perf` cannot see it — the probe runs at
+  ratio 1. `antialias` off for the same reason, and `powerPreference:
+  "high-performance"` so a switchable-graphics laptop stops using the iGPU.
+- **The static shadow map is frozen** after eight warm-up frames
+  (`FreezeShadows` in `MysteryRoom.tsx`). The shadow pass was 418 of the 1221
+  draw calls — a third of all the work in the room, redone every frame to
+  produce a picture that never changed. See the doc comment there for the
+  artefact this accepts and why it is invisible in this particular room.
+- **`RoomScene` is memoised.** It takes no props, but it was mounted under state
+  that changes on every feedback message and every keystroke in the console, so
+  a thousand-element tree was being reconciled per character typed. This is what
+  made the room feel like it was *sticking* rather than running slowly.
+- **Lights cut from 24 to 19.** Every point light is evaluated per fragment by
+  every lit material in the room whether or not it reaches it. Two of the four
+  neon tubes and two of the three pendants kept their glowing mesh and lost
+  their light; the terminal's screen glow lost one it never needed, its screen
+  face being self-lit already. Nothing that a puzzle depends on was touched —
+  the bench lamp, the stag lamps and the reading lights are all still there.
+- **Every `backdrop-blur` in the HUD is gone.** A backdrop filter over a canvas
+  that redraws every frame is re-blurred every frame, and blur is a multi-tap
+  convolution. The worst was the full-screen one behind the completion card.
+  All are replaced with more opaque flat backgrounds, which are both cheaper and
+  more legible.
+
+**Still on the table.** 810 draw calls for 17.6k triangles is about 21 triangles
+a call, which is the signature of a room built from several hundred separate
+small meshes — 48 keyboard keys, 27 typewriter keys, thirteen floorboards, and
+so on down. Halving it again means instancing or merging the static scenery.
+That is a real refactor of `MysteryRoomScene.tsx` and it has not been done.
+
+---
+
 ## Things that will bite you
 
 **`reactStrictMode` is off, and has to stay off.** StrictMode double-mounts in
@@ -234,6 +327,27 @@ hidden in. The stove and step ladder both had to move for exactly this reason;
 neither made anything *strictly* unreachable, which is why only walking the room
 found it. The left-hand corridor at `z ≈ 0.5`, between the filing cabinets and
 the crates, is the only route to the window end and must stay clear.
+
+**Pointer lock freezes `clientX`/`clientY`.** Ctrl engages mouse-look, and once
+the pointer is locked the browser stops updating those coordinates — they stay
+wherever the cursor was standing when the lock was taken. R3F's default hit test
+derives from exactly them, so without an override every click in mouse-look mode
+fires at a stale point off to one side of what the player is aiming at. `Player`
+swaps R3F's `compute` for one that raycasts dead centre while locked and puts
+the default back on release. Nothing downstream knows lock exists.
+
+**Re-locking can be refused, and the rejection is unhandled.** Chrome rejects a
+`requestPointerLock` within about a second of an Escape-driven exit, on purpose,
+so a page cannot trap a cursor. It comes back as a rejected promise that has to
+be swallowed or it surfaces as an error in the console of a room working fine.
+
+**The cartridge rack has to stay raked.** Flat, the three rows sat at one height
+and a ray aimed at the middle row from where a player stands passed through the
+click target of the cartridge in front of it — so the front row ate every click
+meant for anything behind it. On a rack where a wrong click destroys a cartridge
+permanently, that meant the task could delete its own answer while the player
+was aiming at something else. `ROW_LIFT` is what makes the back rows clickable
+at all, and it is also the only way all twelve batch numbers are legible at once.
 
 **A raycast has no range.** A click lands on whatever the crosshair covers,
 however far away. The harness once "opened" the book from four metres across the

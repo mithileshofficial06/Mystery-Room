@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "shoot": "node scripts/shoot-room.mjs"
+    "shoot": "node scripts/shoot-room.mjs",
+    "perf": "node scripts/perf-room.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.0.6",

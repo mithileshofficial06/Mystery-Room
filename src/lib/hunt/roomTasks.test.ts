@@ -88,7 +88,26 @@ describe("ROOM_SECTIONS", () => {
   it("gives every section something to show while it is locked", () => {
     for (const s of ROOM_SECTIONS) {
       expect(s.title.length).toBeGreaterThan(0);
-      expect(s.hint.length).toBeGreaterThan(0);
+      expect(s.hints).toHaveLength(2);
+      for (const hint of s.hints) expect(hint.length).toBeGreaterThan(0);
+    }
+  });
+
+  // Two identical lines would be one clue wearing a rail slot twice, and the
+  // whole point of the second is that it says a different kind of thing.
+  it("gives every section two clues that differ", () => {
+    for (const s of ROOM_SECTIONS) {
+      expect(s.hints[0]).not.toBe(s.hints[1]);
+    }
+  });
+
+  // A clue that contains its own answer is a spoiler with extra steps. This is
+  // the check that catches a well-meaning edit to a hint years from now.
+  it("never puts the answer in the clue", () => {
+    for (const s of ROOM_SECTIONS) {
+      for (const hint of s.hints) {
+        expect(normaliseCode(hint)).not.toContain(normaliseCode(s.code));
+      }
     }
   });
 });

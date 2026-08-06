@@ -85,11 +85,23 @@ const STAG_LEFT = [-5.486, 2.676, 3.3];
 const STAG_RIGHT = [5.486, 2.676, 3.3];
 /** Where the stags' beams cross on the boards. */
 const STAG_WORD = [0, 0.03, 2.35];
-/** The full cartridge, and one of the seven spent ones beside it. */
-const CARTRIDGE_FULL = [-0.97, 1.005, 4.2];
-const CARTRIDGE_SPENT = [-0.79, 1.005, 4.02];
+/**
+ * The live cartridge, and the condemned one next to it in the same row.
+ *
+ * Twelve now, not eight, and every one of them is full of coloured fluid — so
+ * there is nothing to see here and the answer comes off the spec card on the
+ * pegboard instead. Both of these are in the middle row of a RAKED rack, which
+ * is the only reason a click can reach them: flat, the front row's click
+ * targets sat on the line of sight to everything behind them.
+ *
+ * Batch 07 is the live one; batch 06 is its neighbour, one column left.
+ */
+const CARTRIDGE_FULL = [-0.93, 1.06, 4.12];
+const CARTRIDGE_SPENT = [-0.75, 1.06, 4.12];
+/** The spec card on the pegboard: the second clue, without which this is a guess. */
+const SPEC_CARD = [-1.85, 1.43, 4.53];
 /** The web the shooter throws across the bench. */
-const WEB = [-1.76, 0.93, 3.96];
+const WEB = [-1.54, 0.93, 3.96];
 /**
  * The one book on the wall that is shelved upside down, and a decoy in the
  * same bay.
@@ -418,8 +430,21 @@ async function enterCode(word) {
 }
 
 if (script === "solve") {
-  console.log("\n-- The two stags, from where the player starts --");
+  console.log("\n-- The task rail, before anything has been touched --");
   check("no section is open to begin with", (await sectionsText()) === "SECTIONS 0/5", await sectionsText());
+  // Two clues per task, five tasks. A locked section that has lost one of its
+  // clues is not a visible failure — the rail still looks fine — so this is the
+  // only place it would ever be caught.
+  const clueCount = await page.locator("ul ol > li").count();
+  check("every locked section shows two clues", clueCount === 10, clueCount);
+  check(
+    "the second clue for the bench points at the spec card",
+    await page.locator("text=/spec card pinned to the pegboard/").first().isVisible(),
+    null
+  );
+  await shot("0-rail");
+
+  console.log("\n-- The two stags, from where the player starts --");
   const stagRange = await lookAndClick(STAG_LEFT, 300);
   check("a stag can be worked from across the room", stagRange <= STAG_REACH, `${stagRange.toFixed(2)}m`);
   check(
@@ -472,22 +497,69 @@ if (script === "solve") {
     null
   );
 
+  /**
+   * Mouse-look, on Ctrl.
+   *
+   * Checked by turning the view with raw mouse movement and NOT with a drag.
+   * That distinction is the whole feature: `page.mouse.move` with no button
+   * down does nothing at all in drag mode, so if the yaw changes here the
+   * pointer really is locked and the movement handler really is reading
+   * movementX. Asserting on the chip alone would pass on a room that had
+   * merely relabelled a button.
+   */
+  console.log("\n-- Ctrl engages mouse-look --");
+  const lookBefore = await state();
+  await page.keyboard.press("Control");
+  await page.waitForTimeout(400);
+  const lockedChip = await page.locator("text=/MOUSE LOOK · CTRL TO RELEASE/").first().isVisible();
+  check("Ctrl captures the cursor", lockedChip, null);
+  await page.mouse.move(centre.x + 220, centre.y);
+  await page.waitForTimeout(250);
+  const lookAfter = await state();
+  check(
+    "the view follows the mouse with no button held",
+    Math.abs(lookAfter.yaw - lookBefore.yaw) > 0.1,
+    (lookAfter.yaw - lookBefore.yaw).toFixed(3)
+  );
+  await page.keyboard.press("Control");
+  await page.waitForTimeout(400);
+  check(
+    "Ctrl again hands the cursor back",
+    !(await page.locator("text=/MOUSE LOOK · CTRL TO RELEASE/").first().isVisible()),
+    null
+  );
+
   console.log("\n-- The fluid bench, behind the spawn point --");
   await walkTo([CARTRIDGE_SPENT[0], 0, 3.4], 0.5, 12);
+
+  // The spec card first, because without it this task is a one-in-twelve guess
+  // that destroys eleven cartridges on the way to being right. If the card ever
+  // stops being reachable and readable from where a player stands at the rack,
+  // the task is broken whatever the rack does.
+  const cardRange = await lookAndClick(SPEC_CARD, 300);
+  check("the spec card is within reach of the rack", cardRange <= 2.4, `${cardRange.toFixed(2)}m`);
+  check("reading the card is not itself an action", (await sectionsText()) === "SECTIONS 1/5", await sectionsText());
+  await shot("3a-spec-card");
+
   const spentRange = await lookAndClick(CARTRIDGE_SPENT, 300);
   check("the cartridge rack is reachable on foot", spentRange <= REACH, `${spentRange.toFixed(2)}m`);
+  // Batch 06, not the live one. Naming the batch in the message is what tells a
+  // player which of twelve identical-looking tubes they just destroyed.
   check(
-    "a spent cartridge crumbles and is gone",
-    /crumbles to nothing/.test(await waitForNote(/crumbles to nothing/)),
+    "a condemned cartridge crumbles and is gone",
+    /Batch 06 .*crumbles to nothing/.test(await waitForNote(/crumbles to nothing/)),
     await note()
   );
+  // The rake is what makes this possible at all: the middle row is behind the
+  // front row from every position a player can stand in. If this click lands on
+  // batch 10 instead, the message will say 10 and this check fails.
   const fullRange = await lookAndClick(CARTRIDGE_FULL, 200);
-  check("the full cartridge is reachable on foot", fullRange <= REACH, `${fullRange.toFixed(2)}m`);
+  check("the live cartridge is reachable on foot", fullRange <= REACH, `${fullRange.toFixed(2)}m`);
   // Loading the shooter and firing it are separate. If the click fired it, the
   // charge would be scenery.
   check(
-    "the full cartridge seats in the shooter",
-    /seats in the shooter/.test(await waitForNote(/seats in the shooter/, 700)),
+    "the live cartridge seats in the shooter",
+    /Batch 07 .*seats in the shooter/.test(await waitForNote(/seats in the shooter/, 900)),
     await note()
   );
   const webSaid = await waitForNote(new RegExp(`with a word in it: ${WORDS.bench}`));
@@ -627,9 +699,47 @@ if (script === "solve") {
   check("the item word opens the last section", (await sectionsText()) === "SECTIONS 5/5", await sectionsText());
 
   // The whole point of the room: five sections open hands the reveal code to
-  // the shell. The preview page holds it in the box under the viewport.
-  const handedUp = await page.locator('input[placeholder="Enter the code"]').inputValue();
-  check("a full set of sections hands ARCHIVES88 up to the shell", handedUp === "ARCHIVES88", handedUp);
+  // the shell. Read off the preview page's report line, not an input box — the
+  // second code box under the canvas is gone, because the completion card now
+  // shows the code and two entry boxes on one page is one too many.
+  //
+  // `p` and not a bare text selector. A text selector matches the INNERMOST
+  // element containing the string, which here is the label span, so it returned
+  // "HANDED UP TO THE SHELL:" with the code sitting in the sibling span next to
+  // it and the check failing on a room that was working perfectly.
+  const handedUp =
+    (await page.locator("p", { hasText: "HANDED UP TO THE SHELL" }).first().textContent()) ?? "";
+  check(
+    "a full set of sections hands ARCHIVES88 up to the shell",
+    handedUp.includes("ARCHIVES88"),
+    handedUp.trim()
+  );
+
+  // Finishing has to be an event, not the absence of anything left to do.
+  console.log("\n-- Finishing the room says so --");
+  const card = page.locator("text=/The room is yours/").first();
+  check("a completion card comes up on the fifth section", await card.isVisible(), null);
+  // Scoped INSIDE the card. Unscoped, /^ARCHIVES88$/ also matches the preview
+  // page's report line under the viewport — which meant this check passed on a
+  // run where the card never appeared at all, reporting a working celebration
+  // by reading the one piece of text that proves nothing about it.
+  const cardBody = page.locator("div").filter({ hasText: /^ALL FIVE SECTIONS OPEN/ }).last();
+  check(
+    "and it shows the assembled code",
+    await cardBody.locator("text=/^ARCHIVES88$/").first().isVisible(),
+    null
+  );
+  await shot("14-completed");
+  await page.locator("text=BACK TO THE ROOM").first().click();
+  await page.waitForTimeout(400);
+  check("it can be dismissed", !(await card.isVisible()), null);
+  // ...and got back, because the first thing anyone does with a card over the
+  // room is close it and the second is want the code again.
+  await page.locator("text=ROOM SOLVED · SHOW CODE").first().click();
+  await page.waitForTimeout(400);
+  check("and brought back from the rail", await card.isVisible(), null);
+  await page.locator("text=BACK TO THE ROOM").first().click();
+  await page.waitForTimeout(400);
 
   console.log("\n-- The desk lamp is signalling --");
   const lampAt = await route([[-2.6, 0.55], [-2.0, -1.7], [0, -2.0]], [-0.2, 0, -3.0], 0.5);
@@ -638,7 +748,7 @@ if (script === "solve") {
   // lamp out and the difference between its two states goes with it.
   await page.keyboard.press("f");
   await page.waitForTimeout(600);
-  await shot("14-lamp");
+  await shot("15-lamp");
   check("the desk lamp blinks rather than sitting still", await lampBlinks(), null);
 }
 
